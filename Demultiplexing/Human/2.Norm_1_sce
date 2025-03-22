@@ -1,0 +1,104 @@
+library(scater)
+library(scran)
+library(sctransform)
+library(tidyverse)
+library(BiocParallel)
+library(patchwork)
+bpp <- MulticoreParam(7)
+
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/QC/sce_after_QC.rds")
+
+colData(sce)$sum_b_norm <- colSums(counts(sce))
+beforeNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_b_norm) %>% 
+  mutate(cell_num = 1:n())
+
+p_before_nom <- ggplot(data=beforeNorm, aes(x=cell_num, y=log(sum_b_norm))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='Log(Cell UMI counts)',
+        title = "All Samples: Before Normalization" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_before_nom
+
+pdf("countsVsBarcodes_before_normalisation.pdf")
+p_before_nom
+dev.off()
+
+#Scaling 
+
+#finding size factros using deconvolution 
+set.seed(100)
+clust <- quickCluster(sce, BPPARAM=bpp)
+table(clust)
+#   1    2    3    4    5    6    7    8    9   10   11   12   13   14   15   16 
+#2035  696 1212 2181 1740  663  919  281  448 1628 2445 2154  642 1905  272  768 
+# 17   18   19   20   21   22   23   24 
+#698  235  899  232  241  200  173  149 
+
+sce <- computePooledFactors(sce,
+             clusters = clust,
+             min.mean = 0.1,
+             BPPARAM = bpp)
+deconv.sf <- sizeFactors(sce)
+summary(deconv.sf)
+#Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+#0.08849   0.15792   0.27468   1.00000   0.72592 228.75328
+
+#finding size factors based on lib.sizes 
+lib.sf <- librarySizeFactors(sce)
+
+#comapring the two methods 
+data.frame(LibrarySizeFactors = lib.sf, 
+           DeconvolutionSizeFactors = deconv.sf,
+                 SampleDay = colData(sce)$day_H) %>%
+  ggplot(aes(x=LibrarySizeFactors, y=DeconvolutionSizeFactors)) +
+      geom_point(aes(col=SampleDay)) +
+      geom_abline(slope = 1, intercept = 0)
+
+ggsave("lib_vs_deconv_df.pdf")
+
+
+#applying the size factros chose: (deconvolution of lib.szies?)
+sce <- logNormCounts(sce, size.factors = lib.sf)
+
+saveRDS(sce, "sce.intermediate.rds")
+
+colData(sce)$sum_a_norm <- colSums(assay(sce, "logcounts"))
+afterNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_a_norm) %>% 
+  mutate(cell_num = 1:n())
+
+p_after_nom <- ggplot(data=afterNorm, aes(x=cell_num, y=log(sum_a_norm))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell UMI counts)',
+        title = "All Samples: After Normalization" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_after_nom
+
+pdf("countsVsBarcodes_after_normalisation.pdf")
+p_after_nom
+dev.off()
+
+
+#exploring the mean-variance correlations 
+mean_norm <- rowMeans(assay(sce, "logcounts"))
+var_norm <- rowVars(assay(sce, "logcounts"))
+
+pdf("mean-varaince_relationship_before_transformation.pdf")
+plot(mean_norm, var_norm)
+abline(a=1, b=1, col="red")
+dev.off()
+
+#save nromalised sce 
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/Norm/sce_after_Norm.rds")

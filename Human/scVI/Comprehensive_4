@@ -1,0 +1,155 @@
+#conda activate scVI 
+python3.9 -m pip install torch
+python3.9 -m pip install scanpy
+python3.9 -m pip install scvi-tools
+python3.9 -m pip install scikit-misc
+
+#R
+library(SingleCellExperiment)
+library(zellkonverter)
+library(Matrix)
+library(anndata)
+library(reticulate)
+use_python("/home/hania/miniconda3/envs/scanpy/bin/python", required = TRUE)
+
+sce <- readRDS("/data2/hanna/axonoutgrowth/human2/corrections/sce_clusters_correction.rds")
+
+cell_sums <- colSums(counts(sce))
+cell_logsums <- colSums(assay(sce, "logcounts"))
+colData(sce)$cell_sums <- cell_sums
+colData(sce)$cell_logsums <- cell_logsums
+
+
+adata_counts <- SCE2AnnData(sce, 
+  X_name = NULL, 
+  assays = TRUE,
+  colData = TRUE,
+  rowData = TRUE,
+  varm = TRUE,
+  reducedDims = TRUE,
+  metadata = TRUE,
+  colPairs = TRUE,
+  rowPairs = TRUE,
+  skip_assays =FALSE
+) 
+anndata::write_h5ad(adata_counts, "/data2/hanna/axonoutgrowth/human2/corrections/adata.h5ad")
+
+#python
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+import torch
+device = torch.device("cpu")
+
+import tempfile
+import scanpy as sc
+import scvi
+from skmisc.loess import loess
+import pandas as pd
+import numpy as np
+import anndata as ad
+import igraph
+import fa2_modified
+
+adata = ad.read_h5ad("/data2/hanna/axonoutgrowth/human2/corrections/adata.h5ad")
+
+normalized_counts = adata.layers["logcounts"]
+
+adata.layers["counts"] = adata.X.copy()
+adata.layers["counts"] = adata.layers["counts"].tocsr()
+adata.X = adata.X.tocsr()
+
+scvi.model.SCVI.setup_anndata(adata, layer="counts")
+model = scvi.model.SCVI(adata)
+model.train()
+
+model_dir = os.path.join('/data2/hanna/axonoutgrowth/human2/scVI/results', "scvi_model_full")
+model.save(model_dir, overwrite=True)
+denoised = model.get_normalized_expression(adata, library_size=1e4)
+denoised.T.to_csv("scVI_denoised_expression.csv", sep=',')
+
+sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=True, layer="counts", flavor="seurat_v3")
+
+scvi.model.SCVI.setup_anndata(adata, layer="counts")
+model = scvi.model.SCVI(adata)
+model.train()
+model_dir = os.path.join('/data2/hanna/axonoutgrowth/human2/scVI/results', "scvi_model")
+model.save(model_dir, overwrite=True)
+
+SCVI_LATENT_KEY = "X_scVI"
+latent = model.get_latent_representation()
+adata.obsm[SCVI_LATENT_KEY] = latent
+latent.shape #(24594, 10)
+
+sc.pp.neighbors(adata, use_rep=SCVI_LATENT_KEY)
+sc.tl.umap(adata, min_dist=0.3)
+sc.tl.leiden(adata, resolution=.5)
+
+sc.pl.umap(
+    adata,
+    color=["day_H"],
+    frameon=False,
+    save='umap_plot.pdf' 
+)
+
+sc.write("/data2/hanna/axonoutgrowth/human2/scVI/results/scvi_adata.h5ad", adata)
+
+
+#R
+library(ggplot2)
+library(zellkonverter)
+library(SingleCellExperiment)
+library(reticulate)
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+
+
+sce <- readH5AD("/data2/hanna/axonoutgrowth/human2/scVI/results/scvi_adata.h5ad")
+
+pca <- reducedDim(sce, "X_scVI")
+plotReducedDim(sce, dimred = "X_scVI", colour_by = "day_H")
+
+
+X_umap <- reducedDim(sce, "X_umap")
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_10scVI", 
+               dimred = "X_scVI",
+               n_dimred = 10,
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+UMAP_10scVI <- reducedDim(sce, "UMAP_10scVI")
+
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = X_umap[,1],
+      UMAP2 = X_umap[,2],
+      UMAP3 = UMAP_10scVI[,1],
+      UMAP4 = UMAP_10scVI[,2]
+      )
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+
+
+ggplot(df_umap, aes(x = UMAP2, y = UMAP3, color = leiden)) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+
+
+

@@ -1,0 +1,132 @@
+library(BiocParallel)
+library(scran)
+library(irlba)
+library(Rtsne)
+library(Matrix)
+library(ggplot2)
+library(biomaRt)
+library(viridisLite)
+library(viridis)
+library(scDblFinder)
+library(umap)
+library(celda)
+library(patchwork)
+
+
+#reading in the Nromalised data 
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/Norm/sce_after_Norm.rds")
+
+sce.delta <- decontX(sce)
+
+saveRDS(sce.delta, "/mnt/hanna/axonoutgrowth/human2/decontX/sce_decontX.rds")
+
+
+#ploting UMAP
+umap <- reducedDim(sce.delta, "decontX_UMAP")
+df_plot <- data.frame(
+      colData(sce.delta), 
+      UMAP1 = umap[,1],
+      UMAP2 = umap[,2] 
+      )
+p_decont <- ggplot(df_plot, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+  geom_point(size = 0.4) +
+  labs(x = "Dim 1", y = "Dim 2") +
+  theme_minimal() + 
+  theme(legend.position = "right") +  
+  guides(colour = guide_legend(override.aes = list(size = 5))) + 
+  coord_fixed(ratio = 1)
+ggsave("p_decont_by_Day.pdf")
+
+pdf("p_decont_decontX_clusters.pdf")
+plotDimReduceCluster(x = sce.delta$decontX_clusters,
+    dim1 = umap[, 1], dim2 = umap[, 2])
+dev.off()
+
+ngenes <- colSums(assay(sce.delta, "decontXcounts")>0)
+lib.sizes <- colSums(assay(sce.delta, "decontXcounts"))
+df_plot <- data.frame(
+      colData(sce.delta),
+      lib.sizes,
+      ngenes,
+      UMAP1 = umap[,1],
+      UMAP2 = umap[,2] 
+      )
+ggplot(df_plot, aes(x = UMAP1, y = UMAP2, color = log(lib.sizes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(lib.sizes_decontX)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) + 
+        scale_color_gradient(low = "blue", high = "red") +
+        coord_fixed(ratio = 1)
+ggsave('decontX_UMAP_by_libsizes_decontX.pdf') 
+
+ggplot(df_plot, aes(x = UMAP1, y = UMAP2, color = log(ngenes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(ngenes_decontX)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10))  + 
+        scale_color_gradient(low = "blue", high = "red") +
+        coord_fixed(ratio = 1)
+ggsave('decontX_UMAP_by_ngenes_decontX.pdf') 
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/decontX/sce_decontX.rds")
+
+colData(sce)$sum_decontX <- colSums(assay(sce, "decontXcounts"))
+beforeNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName, bc_wells, sum_decontX) %>% 
+  mutate(cell_num = 1:n())
+
+p_before_nom <- ggplot(data=beforeNorm, aes(x=cell_num, y=log(sum_decontX))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell decontX counts)',
+        title = "All Samples: Before Normalization after decontX" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_before_nom
+
+pdf("countsVsBarcodes_before_normalisation_after_decontX.pdf")
+p_before_nom
+dev.off()
+
+#scaling using lib.sizes 
+lib.sf <- librarySizeFactors(sce, assay.type = "decontXcounts")
+sce <- logNormCounts(sce, size.factors=lib.sf, assay.type= "decontXcounts", name = "decontXlogcounts")
+
+#data after normalisation
+colData(sce)$sum_decontXlogcounts <- colSums(assay(sce, "decontXlogcounts"))
+afterNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_decontXlogcounts) %>% 
+  mutate(cell_num = 1:n())
+
+p_after_nom <- ggplot(data=afterNorm, aes(x=cell_num, y=log(sum_decontXlogcounts))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell decontXlogcounts)',
+        title = "All Samples: After Normalization and decontX" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_after_nom
+
+pdf("countsVsBarcodes_after_normalisation_aft_decontX.pdf")
+p_after_nom
+dev.off()
+
+#checking for mean-variance correlation
+mean_norm <- rowMeans(assay(sce, "decontXlogcounts"))
+var_norm <- rowVars(assay(sce, "decontXlogcounts"))
+
+pdf("mean-varaince_relationship_decontXlogcounts.pdf")
+plot(mean_norm, var_norm)
+abline(a=1, b=1, col="red")
+dev.off()
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/Norm/sce_Norm_after_decontX.rds")

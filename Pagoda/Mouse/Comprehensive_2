@@ -1,0 +1,1553 @@
+cd /data2/hanna/axonoutgrowth/mouse2/pagoda2
+singularity shell --bind /data2:/mnt singlecell_last.sif
+cd /mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis
+R
+
+library(Matrix)
+library(igraph)
+library(pagoda2)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(tidyr)
+
+## load the dataset, count matrix whereby rows are genes, columns are cells.
+path2data <- "/mnt/hanna/axonoutgrowth/data/mouse/"
+counts <- readMM(paste0(path2data, "counts.mtx"))
+metadata <- read.csv(paste0(path2data, "metadata.csv"))
+barcodes <- read.csv(paste0(path2data, "barcodes.csv"))
+gene_info <- read.csv(paste0(path2data, "gene_info.csv"))
+counts <- as(counts, "CsparseMatrix")
+rownames(counts) <- gene_info$unique_name
+colnames(counts) <- barcodes$barcodes 
+
+counts_raw <- counts
+
+mt.indices <- grep("^mt", rownames(counts_raw))
+mt.genes <- rownames(counts_raw)[mt.indices]
+mt.fraction <- colSums(counts_raw[mt.genes, ])/colSums(counts_raw)
+total_counts_raw <- colSums(counts_raw)
+metadata$mt.fraction <- mt.fraction
+metadata$total_counts_raw <- total_counts_raw 
+
+filter <- metadata$bc_wells[metadata$mt.fraction <= 0.04]
+counts_filtered <- counts[,filter]
+dim(counts_filtered) [1] 56981 500520
+metadata_filtered <- metadata[metadata$bc_wells %in% filter,]
+
+filter <- metadata$bc_wells[metadata$mt.fraction <= 0.05]
+counts_filtered <- counts[,filter]
+dim(counts_filtered) [1]  56981 535955
+metadata_filtered <- metadata[metadata$bc_wells %in% filter,]
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#QC
+
+#plotting  number of cells per sample
+cell_counts <- table(metadata$sample_name_M)
+cell_counts_df <- as.data.frame(cell_counts)
+colnames(cell_counts_df) <- c("sample", "num_cells")
+ggplot(cell_counts_df, aes(x = sample, y = num_cells)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  
+  theme_minimal() + coord_fixed() +                                 
+  xlab("Sample") +                                 
+  ylab("Number of Cells") +                          
+  ggtitle("Number of Cells per Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  theme(aspect.ratio = 1/4)
+ggsave("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/cell_number_per_sample.png")
+
+
+par(mfrow=c(1,2), mar = c(3.5,3.5,2.0,0.5), mgp = c(2,0.65,0), cex = 1.0)
+pdf("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/dist_molecules_per_cell_pre_processing.pdf")
+hist(log10(colSums(countMatrix)+1),main='molecules per cell',col='wheat',xlab='log10[ molecules per cell]')
+dev.off()
+
+pdf("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/dist_molecules_per_gene_pre_processing.pdf")
+hist(log10(rowSums(countMatrix)+1),main='molecules per gene',col='wheat',xlab='log10[ molecules per gene]')
+dev.off()
+--------------------------------------------------------------------------------------------------------------------------------------
+p2 <- basicP2proc(counts_filtered, n.cores=8, min.cells.per.gene=10, nPcs=30, 
+                    n.odgenes=2e3, get.largevis=FALSE, make.geneknn=TRUE, get.tsne = FALSE,min.transcripts.per.cell=100)
+
+dim(p2$counts) #[1] 15015 24216
+
+#calcualting UMAP embedding for pagoda2 object. 
+p2$getEmbedding(type='PCA', embeddingType='UMAP',  n_neighbors = 100, min_dist = 0.9, verbose=FALSE)
+p2$plotEmbedding(type='PCA', embeddingType='UMAP', show.legend=FALSE, mark.groups=TRUE, min.cluster.size=1, shuffle.colors=TRUE, font.size=3, alpha=0.3, title='clusters (UMAP)', plot.theme=theme_bw() + theme(plot.title = element_text(hjust = 0.5)))
+ggsave("umap_mouse_pagoda2_basicP2proc_byCluster.png")
+
+#Adding metadata
+selected_cells <- rownames(p2$counts)
+filtered_metadata <- metadata[metadata$bc_wells %in% selected_cells,]
+filtered_metadata <- filtered_metadata[match(selected_cells, filtered_metadata$bc_wells), ]
+filtered_metadata$depth <- c(p2$depth) 
+filtered_metadata$count_num <- rowSums(p2$counts)
+filtered_metadata$gene_num <- rowSums(p2$counts > 0)
+p2$depth <- filtered_metadata
+
+saveRDS(p2, "/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc.rds")
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#manual anlaysis 
+pdf("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/QC_mouse_post_filter_min500countspercell.pdf")
+counts <- gene.vs.molecule.cell.filter(countMatrix, min.cell.size=500)
+dev.off()
+
+pdf("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/Molecules_per_gene_post_filter_min500countspercell.pdf")
+hist(log10(rowSums(counts)+1), main='Molecules per gene', xlab='molecules (log10)', col='cornsilk')
+abline(v=1, lty=2, col=2)
+dev.off()
+
+#dim(counts_raw) 56981 631700
+#dim(counts) 62704 51648
+
+counts <- counts[rowSums(counts)>=10, ]
+#dim(counts) 56981 15249
+
+r <- Pagoda2$new(counts,log.scale=TRUE)
+
+r$adjustVariance(plot=TRUE, gam.k=10)
+r$calculatePcaReduction(nPcs=30, n.odgenes=3e3)
+
+#calulcating clusters
+r$makeKnnGraph(k=100, type='PCA', center=TRUE, distance='cosine')
+r$getKnnClusters(method=multilevel.community,type='PCA',name='multilevel')
+
+#r$getKnnClusters(method=infomap.community, type='PCA') #can input a list of gens of joice! 
+
+#M <- 30
+#r$getEmbedding(type='PCA', embeddingType = 'largeVis', M=M, perplexity=30, gamma=1/M)
+#r$plotEmbedding(type='PCA', show.legend=FALSE, mark.groups=TRUE, min.cluster.size=50, shuffle.colors=FALSE, font.size=3, alpha=0.3, title='clusters (largeVis)', plot.theme=theme_bw() + theme(plot.title = element_text(hjust = 0.5)))
+
+#calcualting UMAP embedding for pagoda2 object. 
+r$getEmbedding(type='PCA', embeddingType='UMAP',  n_neighbors = 500, min_dist = 0.9, verbose=FALSE)
+r$plotEmbedding(type='PCA', embeddingType='UMAP', show.legend=FALSE, mark.groups=TRUE, min.cluster.size=1, shuffle.colors=TRUE, font.size=3, alpha=0.3, title='clusters (UMAP)', plot.theme=theme_bw() + theme(plot.title = element_text(hjust = 0.5)))
+ggsave("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/umap_mouse_pagoda2_manually_byCluster.png")
+
+#calcualting tSNE embedding for pagoda2 object. 
+r$getEmbedding(type='PCA', embeddingType='tSNE', perplexity=70, verbose=FALSE)
+r$plotEmbedding(type='PCA', embeddingType='tSNE', show.legend=FALSE, mark.groups=TRUE, min.cluster.size=1, shuffle.colors=TRUE, font.size=3, alpha=0.3, title='clusters (tSNE)', plot.theme=theme_bw() + theme(plot.title = element_text(hjust = 0.5)))
+ggsave("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/plots/tsne_mouse_pagoda2_manually_byCluster.png")
+
+#Adding metadata
+selected_cells <- rownames(r$counts)
+filtered_metadata <- metadata[metadata$bc_wells %in% selected_cells,]
+filtered_metadata <- filtered_metadata[match(selected_cells, filtered_metadata$bc_wells), ]
+r$misc <- filtered_metadata
+r$misc$count_num_norm <- rowSums(r$counts)
+r$misc$gene_num <- rowSums(r$counts > 0)
+
+saveRDS(r, "/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_pagoda2_manually.rds")
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#plottign pcs
+pca_data <- as.data.frame(p2$reductions$PCA)
+df <- data.frame(
+  PC1 = pca_data[, 1],  
+  PC2 = pca_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Count_num = p2$depth$count_num,
+  Gene_num = p2$depth$gene_num
+)
+
+#coloured differnet metadata elements
+ggplot(df, aes(x = PC1, y = PC2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Sample", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percsample.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = Day)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Day", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percday.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = Replicate)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Replicate", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percreplicate.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = Batch)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Batch", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percbatch.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = Count_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Batch", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4perccount_num.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = Gene_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Batch", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percgene_num.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = log(Count_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Batch", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4perccount_num_log.png")
+
+ggplot(df, aes(x = PC1, y = PC2, color = log(Gene_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "PCA Plot by Batch", x = "PC1", y = "PC2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank())  
+ggsave("pca_mouse_basicP2proc_filt500_mt4percgene_num_long.png")
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#p2 <- readRDS("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc.rds")
+#p2 <- readRDS("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt5perc.rds")
+
+#plotting umap 
+umap_data <- as.data.frame(p2$embeddings$PCA$UMAP)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Count_num = p2$depth$count_num,
+  Gene_num = p2$depth$gene_num
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Day)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Day", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_day.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Sample", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_sample.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Batch)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Batch", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_batch.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Replicate)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_replicate.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Count_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_count_num.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Gene_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_gene_num.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = log(Count_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_count_num_log.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = log(Gene_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_gene_num_log.png")
+--------------------------------------------------------------------------------------------------------------------------------------
+#plotting eachd ay on separate umap
+umap_data <- as.data.frame(p2$embeddings$PCA$UMAP)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$misc$day_M),
+  Batch = as.factor(p2$misc$batch_M),
+  Replicate = as.factor(p2$misc$replicate_M),
+  Sample = as.factor(p2$misc$sample_name_M),
+  Count_num = p2$misc$count_num_norm,
+  Gene_num = p2$misc$gene_num
+)
+
+unique_days <- sort(unique(df$Day))
+plot_list <- list()
+for (day in unique_days) {
+  df$highlight <- ifelse(df$Day == day, as.character(day), "gray")
+  p <- ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(data = df %>% filter(Day != day), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Day == day), aes(color = "red"), size = 0.4, alpha = 0.7) +
+    labs(title = paste("Day", day)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + coord_fixed() + 
+    coord_fixed() +
+    theme(legend.position = "none")
+  plot_list[[as.character(day)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 3)
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt5perc_day_grid.png", plot = final_plot, width = 12, height = 10)
+
+
+#plotting batches seprately on the same umap
+batches <- unique(df$Batch)
+plot_list <- list()
+for (batch in batches) {
+  df$highlight <- ifelse(df$Day == batch, as.character(batch), "gray")
+  p <- ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(data = df %>% filter(Batch != batch), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Batch == batch), aes(color = "red"), size = 0.4, alpha = 0.5) +
+    labs(title = paste("Batch", batch)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + coord_fixed() +  
+    coord_fixed() +
+    theme(legend.position = "none")
+  plot_list[[as.character(batch)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 2)
+ggsave("umap_mouse_pagoda2_basicP2proc_batch_grid.png", plot = final_plot, width = 12, height = 10)
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#HARMONY
+#runign harmony on the PCA, integrating by batch. 
+V <- as.data.frame(p2$reductions$PCA) 
+meta_data <- p2$depth
+
+harmony_embedding_batch <- harmony::HarmonyMatrix(
+    V, meta_data, 'batch_M', verbose=FALSE)
+#does not coverge
+
+V_reduced <- V[, 1:30] 
+harmony_embedding_batch_reduced <- harmony::HarmonyMatrix(
+        V_reduced, meta_data, 'batch_M', max_iter = 50, lambda = 1, theta = 2,  verbose=TRUE)
+
+p2$reductions$PCA_harmony_batch <- harmony_embedding_batch_reduced 
+
+#calcualting umap embedding based on hramony_PCAs for pagoda2 object. 
+p2$getEmbedding(type = "PCA_harmony_batch", embeddingType = "UMAP", n_neighbors = 30, min_dist = 0.3, verbose = TRUE, name ="UMAP_harmony_batch")
+
+p2$makeKnnGraph(k=50, type='PCA_harmony_batch', center=TRUE, distance='cosine')
+p2$getKnnClusters(method=multilevel.community,type='PCA_harmony_batch',name='multilevel', resolution = 0.3)
+
+p2$plotEmbedding(type='PCA_harmony_batch',embeddingType='UMAP_harmony_batch',show.legend=F,mark.clusters=T,min.group.size=1,shuffle.colors=F,mark.cluster.cex=1,alpha=0.1,main='clusters (UMAP)')
+
+
+#plotting
+harmony_data <- as.data.frame(p2$embeddings$PCA_harmony_batch$UMAP_harmony_batch)
+df <- data.frame(
+  HAR1 = harmony_data[, 1],  
+  HAR2 = harmony_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Count_num = p2$depth$count_num,
+  Gene_num = p2$depth$gene_num,
+  Clusters = p2$clusters$PCA_harmony_batch$multilevel,
+  RawCounts = p2$depth$total_counts_raw
+)
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Clusters)) +
+  geom_point(size = 0.4, alpha = 0.3) +  
+  labs(title = "UMAP Plot by Cluster (k = 50 res0.2)", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_cluster_res0.2_k50.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = log(RawCounts))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by log(RawCounts)", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_log_raw_counts.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Clusters)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Cluster (res0.4)", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_cluster_res0.2.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Sample", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_sample.png")
+
+sample_colours <- c(
+"#7166d9",
+"#58c655",
+"#af57c6",
+"#acbb37",
+"#d149ac",
+"#5ea136",
+"#d9407f",
+"#6fc480",
+"#d83b52",
+"#4ebfa9",
+"#bf3c24",
+"#46aed7",
+"#e0752d",
+"#7293dd",
+"#d29e37",
+"#5d64ac",
+"#838c26",
+"#c88ed9",
+"#3c9153",
+"#964d88",
+"#53772f",
+"#e9b508",
+"#ca88ca",
+"#45953f"
+)
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  scale_color_manual(values=sample_colours, name = "sample") +
+  labs(title = "UMAP Plot by Sample", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_sample_alt.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Batch)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Batch", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_batch.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Day)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Day", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_day.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Replicate)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_replicate.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Count_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_count_num.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = Gene_num)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_gene_num.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = log(Count_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_count_num_log.png")
+
+ggplot(df, aes(x = HAR1, y = HAR2, color = log(Gene_num))) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) 
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_gene_num_log.png")
+
+
+#plotting eachd ay on separate umap
+unique_days <- sort(unique(df$Day))
+plot_list <- list()
+for (day in unique_days) {
+  df$highlight <- ifelse(df$Day == day, as.character(day), "gray")
+  p <- ggplot(df, aes(x = HAR1, y = HAR2)) +
+    geom_point(data = df %>% filter(Day != day), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Day == day), aes(color = "red"), size = 0.4, alpha = 0.7) +
+    labs(title = paste("Day", day)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + 
+    coord_fixed() +
+    theme(legend.position = "none")
+  plot_list[[as.character(day)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 4)
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_day_grid.png", plot = final_plot, width = 12, height = 10)
+
+unique_samples <- sort(unique(df$Sample))
+plot_list <- list()
+for (sample in unique_samples) {
+  df$highlight <- ifelse(df$Sample == sample, as.character(sample), "gray")
+  
+  p <- ggplot(df, aes(x = HAR1, y = HAR2)) +
+    geom_point(data = df %>% filter(Sample != sample), aes(color = "gray"), size = 0.4, alpha = 0.5) +
+    geom_point(data = df %>% filter(Sample == sample), aes(color = "red"), size = 0.4, alpha = 0.7) +
+    labs(title = paste("Sample", sample)) +
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +
+    theme_minimal() +
+    coord_fixed() 
+    theme(legend.position = "none")
+  
+  plot_list[[as.character(sample)]] <- p
+}
+
+final_plot <- wrap_plots(plot_list, ncol = 4)
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_sample_grid.png", plot = final_plot, width = 12, height = 10)
+
+
+#plotting batches seprately on the same umap
+batches <- unique(df$Batch)
+plot_list <- list()
+for (batch in batches) {
+  df$highlight <- ifelse(df$Day == batch, as.character(batch), "gray")
+  p <- ggplot(df, aes(x = HAR1, y = HAR2)) +
+    geom_point(data = df %>% filter(Batch != batch), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Batch == batch), aes(color = "red"), size = 0.4, alpha = 0.5) +
+    labs(title = paste("Batch", batch)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + coord_fixed() +  
+    theme(legend.position = "none")
+  plot_list[[as.character(batch)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 2)
+ggsave("umap_mouse_pagoda2_basicP2proc_harmony_bat_batch_grid.png", plot = final_plot, width = 12, height = 10)
+
+
+saveRDS(p2, "/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc.rds")
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+plotingPCAinfluentialGenes <- function(loadings, pca_no, gene_no) {
+  plot_list <- list()
+
+  for (i in 1:pca_no) {
+    pc_loadings <- loadings[, i]
+    
+    loading_df <- data.frame(
+      Gene = rownames(loadings),
+      Loading = pc_loadings
+    )
+    
+    top_genes <- loading_df %>%
+      arrange(desc(abs(Loading))) %>%
+      slice(1:gene_no)
+    
+    p <- ggplot(top_genes, aes(x = reorder(Gene, abs(Loading)), y = abs(Loading))) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      coord_flip() +  # Flip to make horizontal barplot
+      labs(title = paste("Top", gene_no, "Genes for PC", i), x = "Gene", y = "Absolute Loading") +
+      theme_minimal()
+    
+    plot_list[[paste("PC", i)]] <- p
+  }
+
+  final_plot <- wrap_plots(plot_list, ncol = 2)
+  print(final_plot)
+  output_filename <- paste0("top",gene_no,"_genes_PC1_to_",pca_no, "_mouse_pagoda2_basicP2proc.png")
+  ggsave(output_filename, plot = final_plot, width = 12, height = 10)
+}
+
+plotingPCAinfluentialGenes(p2$misc$PCA$v, 10, 15)
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#plottign gene expression on umap 
+
+plot_gene_expression_on_umap_grey_red <- function(pagoda2_object, gene_name, embedding_name) {
+  harmony_data <- as.data.frame(pagoda2_object$embeddings$PCA_harmony_batch[[embedding_name]])
+  gene_expression <- pagoda2_object$counts[, gene_name]
+  
+  if (is.null(gene_expression)) {
+    stop(paste("Gene", gene_name, "not found in the counts matrix."))
+  }
+  
+  df <- data.frame(
+    HAR1 = harmony_data[, 1],  
+    HAR2 = harmony_data[, 2],  
+    Sample = as.factor(pagoda2_object$depth$sample_name_M),  
+    GeneExpression = gene_expression  
+  )
+  
+  df <- df[order(df$GeneExpression, decreasing = FALSE), ]
+  
+  plot <- ggplot(df, aes(x = HAR1, y = HAR2, color = GeneExpression)) +
+    geom_point(alpha = 0.5, size = 0.4) + 
+    scale_color_gradient(low = "grey", high = "red") +  
+    labs(title = paste(gene_name, "Expression"), 
+         x = "UMAP1", 
+         y = "UMAP2", 
+         color = "Gene Expression") +  
+    theme_minimal() + coord_fixed() +  
+    theme(legend.title = element_blank())
+  
+  return(plot)
+}
+
+plotGeneGroupsOnUMAP <- function(gene_groups, embedding_name, data_object) {
+  for (group_name in names(gene_groups)) {
+    gene_names <- gene_groups[[group_name]] 
+    plots_list <- list() 
+    
+    for (gene in gene_names) {
+      plot <- plot_gene_expression_on_umap_grey_red(data_object, gene, embedding_name)
+      plots_list[[gene]] <- plot
+    }
+    
+    combined_plot <- wrap_plots(plots_list, ncol = 3)
+    
+    output_filename <- paste0("umap_mouse_pagoda2_basicP2proc_harmony_", group_name, "_expression.png")
+    ggsave(output_filename, combined_plot, width = 15, height = 10)
+  }
+}
+
+gene_groups <- list(
+  progenitor_markers = c("Sox2", "Pax6", "Nes", "Hopx", "Eomes"),
+  dividing_cells = c("Cenpe", "Mki67", ),
+  postmitotic_neurons = c("Neurod1", "Neurod2", "Dcx", "Map2", "Tubb3", "Rbfox3"),
+  deep_layer_neurons = c("Fezf2", "Bcl11b", "Tbr1"),
+  upper_layer_neurons = c("Cux1", "Rorb", "Satb1"),
+  interneurons = c("Gad1", "Gad2", "Slc6a1", "Dlx1", "Dlx2"),
+  axon_development = c("Gap43", "L1cam", "Efnb3", "Ank3", "Trim46", "Nfasc"),
+  synapse = c("Syp", "Sncb", "Grin1", "Grin2a", "Camk2b"),
+  brain_regions = c("Foxg1", "Otx2", "Gbx2", "Dlx2", "Lhx2", "Tcf7l2"),
+  cerebral_cortex = c("Foxg1","Neurod6", "Emx1", "Emx2", "Tbr1", "Rel", "Pax6", "Six3"),
+  basal_ganglia = c("Dlx1","Dlx2", "Dlx3", "Dlx5", "Dlx6", "Ppp1r1b", "Foxp2"),
+  hippocampus = c("Prox1", "Zbtb20"),
+  amygdala = c("Pax6", "Lhx9", "Calb2"),
+  olfactory_bulb = c("Tbx21"),
+  thalamus = c("Gbx2", "Lhx2", "Lhx9", "Neurog1", "Neurog2"),
+  hypothalamus = c("Otp", "Sim1", "Sim2", "Arx", "Crh"),
+  epithalamus = c("Aanat"),
+  subthalamus = c("Nkx2-2", "Mnx1"),
+  retina = c("Pax6", "Vsx2", "Otx2", "Crx", "Rho"),
+  substantia_nigra = c("Th", "Nr4a2", "Nr4a2", "Slc6a3"),
+  tectum = c("Otx2", "En1", "En2", "Pax7"),
+  red_nucleus = c("Isl1", "Hoxa2"),
+  choroid_plexus = c("Otx2", "Htr2c", "Ttr", "Msx1", "Clic6"), 
+  haem = c("Wnt2b", "Wnt3a", "Wnt5a", "Wnt7b", "Wnt8b", "Bmp4", "Bmp7", "Msx1", "Msx2", "Lmx1a", "Nrp2", "Dbx1"),
+  mitochondria = c("Sod2", "mt-Co1", "Bcl2", "Bax", "Pink1", "Pacrg", "Hspd1", "Hspe1", "Tfam"),
+  ribosome = c("Rpl11", "Rpl5", "Rps6", "Rps3", "Rpl23"),
+  stress_response = c("Atf4", "Hif1a"),
+  Stress_SelectedMarkers = c("Sulf1", "Slc1a3", "Ntn1", "Gpc3", "Rnf220"),
+  Melanocytes = c("Trpm1", "Tyr", "Mitf", "Dct", "Mlana","Sox10"),
+  pigmented_cells = c("Rpe65", "Cralbp", "Mitf", "Pedf", "Best1"),
+  cell_cycle = c("Pcna", "Top2a", "Mcm6", "Mki67"),
+  s_genes = c("Il2rg", "Atp6v1b2", "Bcl2l1", "Klf4", "Gstm2"),
+  g2m_genes = c("Ncapd2", "Cenpf", "Cdc25a", "Kif2c", "Tubg1", "Prc1"),
+  oligodendrocyte_progenitors = c("Olig2", "Sox10", "Pdgfra", "Ng2"),
+  oligodendrocyte_mature = c("Mbp", "Mog", "Mag", "Plp1", "Cmp", "Galc"),
+  glycoytic = c("Pfkfb3", "Aldoc", "LdhA", "Glut1", "Slc16a1", "Slc16a3", "Ldha", "Fbp1"),
+  astrocytes_tf = c("Nkx2-1", "Nkx3-1", "Nkx6-1", "Nfix", "Sox9", "Nfia", "Nfib"),
+  astrocytes_metabolic_markers = c("S100b", "Gpam", "Cpt1a", "Cpt2", "Pkm2", "Pdk4", "Gk", "Gys1", "G6pc", "Abhd5"),
+  astrocytes_structural = c("Cnn1", "Fmn2", "Nebel", "Synpo2", "Vim", "Gfap", "Aldh1l1", "Aqp4", "Slc1a3", "Sparc", "Thbs1"),
+  pineal_gland_markers = c("Aanat", "Asmt", "Pax6", "Gfap")
+)
+
+gene_groups <- list(
+  pigmented_cells = c("Rpe65", "Rlbp1", "Mitf", "Serpinf1", "Best1")
+)
+
+gene_groups <- list(
+  calcium_channels1 = c("Grm1", "Grm2", "Grm3", "Grm4", "Grm5", "Grm6", "Grm7", "Grm8"),
+  calcium_channels2 = c("Grin1", "Grin2a", "Grin2b"),
+  calcium_channels3 = c("Cacna1c", "Cacna1d"),
+  calcium_channels4 = c("Gria1", "Gria2", "Gria3", "Gria4")
+)
+
+gene_groups <- list(
+    retinal_pigmented1 = c("Rpe65", "Best1", "Rlbp1", "Mitf"),
+    retinal_pigmented2 = c("Tyr", "Tyrp1", "Pmel"),
+    retinal_pigmented3 = c("Tjp1", "Cldn19", "Atp1a1"),
+    retinal_pigmented4 = c("Mertk", "Itgav", "Itgb5", "Serpinf1"),
+    retinal_pigmented5 = c("Lama1", "Col4a1"),
+    retinal_pigmented6 = c("Vega", "Aqp1", "Car4")
+)
+
+
+plotGeneGroupsOnUMAP(gene_groups, "UMAP_harmony_batch", p2)
+
+plot_gene_expression_on_umap_grey_red(p2, "Aldh1l1", "UMAP_harmony_batch")
+--------------------------------------------------------------------------------------------------------------------------------------
+find_missing_genes <- function(gene_groups, counts_matrix) {
+  gene_names_in_data <- colnames(counts_matrix)
+  missing_genes <- list()
+  
+  for (group in names(gene_groups)) {
+    genes <- gene_groups[[group]]
+    missing <- setdiff(genes, gene_names_in_data)
+    
+    if (length(missing) > 0) {
+      missing_genes[[group]] <- missing
+    } else {
+      missing_genes[[group]] <- "All genes present"
+    }
+  }
+  
+  return(missing_genes)
+}
+
+missing_genes <- find_missing_genes(gene_groups, p2$counts)
+print(missing_genes)
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#plotting top 10  and bottom 10 genes contribution to top PCs. 
+
+library(ggplot2)
+library(reshape2)
+
+pca_data <- as.data.frame(p2.mouseall$embeddings$PCA)
+
+
+plot_top_bottom_genes <- function(pca_data, n_pcs = 8, n_genes = 10) {
+  
+  for (i in 1:n_pcs) {
+    pc_column <- paste0("PC", i)
+    pc_loadings <- pca_data[, pc_column]
+        genes <- rownames(pca_data)
+    
+    # Combine genes and their respective PC loadings into a data frame
+    df <- data.frame(genes = genes, loadings = pc_loadings)
+    
+    # Find top 10 and bottom 10 genes
+    top_genes <- df[order(-df$loadings), ][1:n_genes, ]
+    bottom_genes <- df[order(df$loadings), ][1:n_genes, ]
+    
+    # Combine top and bottom genes
+    top_bottom_genes <- rbind(top_genes, bottom_genes)
+    
+    # Create the plot
+    p <- ggplot(top_bottom_genes, aes(x = reorder(genes, loadings), y = loadings, fill = loadings > 0)) +
+      geom_bar(stat = "identity") +
+      scale_fill_manual(values = c("red", "blue")) +  # Positive loadings in blue, negative in red
+      coord_flip() +  # Flip the coordinates for a horizontal bar plot
+      labs(title = paste("Top and Bottom 10 Genes for", pc_column),
+           x = "Genes", y = "PC Loadings") +
+      theme_minimal()
+    
+    # Display the plot
+    print(p)
+  }
+}
+--------------------------------------------------------------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+#cell cycle markere genes used by Seurat vignette.
+
+path2files <- '/mnt/hanna/axonoutgrowth/cell_cycle_seurat_vignette/Homo_sapiens.csv'
+cc.genes <- read.csv(path2files)
+g2m.genes <- cc.genes$gene[cc.genes$phase == "G2/M"]
+s.genes <- cc.genes$gene[cc.genes$phase == "S"]
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------
+#subseting a cluster or a group of clustrs. 
+
+p2<- readRDS("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc_clustRes0.2.rds")
+
+cluster_1_cells <- names(p2$clusters$PCA_harmony_batch$multilevel[p2$clusters$PCA_harmony_batch$multilevel == "1"])
+length(cluster_1_cells)
+[1] 43231
+
+path2data <- "/mnt/hanna/axonoutgrowth/data/mouse/"
+counts <- readMM(paste0(path2data, "counts.mtx"))
+metadata <- read.csv(paste0(path2data, "metadata.csv"))
+barcodes <- read.csv(paste0(path2data, "barcodes.csv"))
+gene_info <- read.csv(paste0(path2data, "gene_info.csv"))
+counts <- as(counts, "CsparseMatrix")
+rownames(counts) <- gene_info$unique_name
+colnames(counts) <- barcodes$barcodes 
+
+counts_raw <- counts
+
+mt.indices <- grep("^mt", rownames(counts_raw))
+mt.genes <- rownames(counts_raw)[mt.indices]
+mt.fraction <- colSums(counts_raw[mt.genes, ])/colSums(counts_raw)
+total_counts_raw <- colSums(counts_raw)
+metadata$mt.fraction <- mt.fraction
+metadata$total_counts_raw <- total_counts_raw 
+
+filter <- metadata$bc_wells[metadata$mt.fraction <= 0.04]
+filter <- filter[filter %in% cluster_1_cells]
+counts_filtered <- counts[,filter]
+dim(counts_filtered) [1]56981 43231
+metadata_filtered <- metadata[metadata$bc_wells %in% filter,]
+
+p2 <- basicP2proc(counts_filtered, n.cores=8, min.cells.per.gene=10, nPcs=30, 
+                    n.odgenes=2e3, get.largevis=FALSE, make.geneknn=TRUE, get.tsne = FALSE,min.transcripts.per.cell=100)
+
+p2$getEmbedding(type = "PCA", embeddingType = "UMAP", n_neighbors = 30, min_dist = 0.3, verbose = TRUE, name ="UMAP")
+
+selected_cells <- rownames(p2$counts)
+filtered_metadata <- metadata[metadata$bc_wells %in% selected_cells,]
+filtered_metadata <- filtered_metadata[match(selected_cells, filtered_metadata$bc_wells), ]
+filtered_metadata$depth <- c(p2$depth) 
+filtered_metadata$count_num <- rowSums(p2$counts)
+filtered_metadata$gene_num <- rowSums(p2$counts > 0)
+p2$depth <- filtered_metadata
+
+#running harmony
+V <- as.data.frame(p2$reductions$PCA) 
+meta_data <- p2$depth
+
+V_reduced <- V[, 1:30] 
+harmony_embedding_batch_reduced <- harmony::HarmonyMatrix(
+        V_reduced, meta_data, 'batch_M', max_iter = 50, lambda = 1, theta = 2,  verbose=TRUE)
+
+p2$reductions$PCA_harmony_batch <- harmony_embedding_batch_reduced 
+
+#calcualting umap embedding based on hramony_PCAs for pagoda2 object. 
+p2$getEmbedding(type = "PCA_harmony_batch", embeddingType = "UMAP", n_neighbors = 30, min_dist = 0.3, verbose = TRUE, name ="UMAP_harmony_batch")
+
+p2$makeKnnGraph(k=200, type='PCA', center=TRUE, distance='cosine')
+p2$getKnnClusters(method=multilevel.community,type='PCA',name='multilevel', resolution = 0.4)
+
+p2$makeKnnGraph(k200, type='PCA_harmony_batch', center=TRUE, distance='cosine')
+p2$getKnnClusters(method=multilevel.community,type='PCA_harmony_batch',name='multilevel', resolution = 0.4)
+
+#doublets and cell-cycle scores 
+counts_matrix <- t(p2$counts) 
+metadata <-  p2$depth
+cell_metadata <-  p2$depth
+gene_metadata <- colnames(p2$counts)
+
+#findign doubelt scores
+sce <- SingleCellExperiment(
+  assays = list(counts =  counts_matrix),  
+  colData = cell_metadata,              
+  rowData = gene_metadata             
+)
+
+library(BiocParallel)
+library(scDblFinder)
+bp <- MulticoreParam(25, RNGseed=1234)
+    bpstart(bp)
+sce <- scDblFinder(sce, samples="bc1_well", dbr=.05, dims=10, BPPARAM=bp)
+      bpstop(bp)
+      table(sce$scDblFinder.class)
+singlet doublet 
+  41802    1429 
+doublet_scores <- colData(sce)$scDblFinder.class
+p2$depth$scDblFinder.class <- doublet_scores
+
+saveRDS(p2, "/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc_clust1.rds")
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+#plotting on human 
+umap_data <- as.data.frame(p2$embeddings$PCA$UMAP)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Clusters = p2$clusters$PCA_harmony_batch$multilevel
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Clusters)) +
+  geom_point(size = 0.4, alpha = 0.3) +  
+  labs(title = "UMAP Plot by Clusters (res0.4 k200)", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_clusters_res0.4_k200.png")
+
+umap_data <- as.data.frame(p2$embeddings$PCA_harmony_batch$UMAP_harmony_batch)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Clusters = p2$clusters$PCA_harmony_batch$multilevel
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Clusters)) +
+  geom_point(size = 0.4, alpha = 0.3) +  
+  labs(title = "UMAP Plot by Clusters (res0.4 k200)", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_clusters_res0.4_k200.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Day)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Day", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_day.png")
+
+sample_colours <- c(
+"#7166d9",
+"#58c655",
+"#af57c6",
+"#acbb37",
+"#d149ac",
+"#5ea136",
+"#d9407f",
+"#6fc480",
+"#d83b52",
+"#4ebfa9",
+"#bf3c24",
+"#46aed7",
+"#e0752d",
+"#7293dd",
+"#d29e37",
+"#5d64ac",
+"#838c26",
+"#c88ed9",
+"#3c9153",
+"#964d88",
+"#53772f",
+"#e9b508",
+"#ca88ca",
+"#45953f"
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) + 
+  scale_color_manual(values=sample_colours, name = "sample") +
+  labs(title = "UMAP Plot by Sample", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) +guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_sample.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Batch)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Batch", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_batch.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Replicate)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_replicate.png")
+
+-------------------------------------------------------------------------------------------------------------------------------------
+umap_data <- as.data.frame(p2$embeddings$PCA_harmony_batch$UMAP_harmony_batch)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Clusters = p2$clusters$PCA$multilevel,
+  doublets = as.factor(p2$depth$scDblFinder.class)
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Clusters)) +
+  geom_point(size = 0.4, alpha = 0.3) +  
+  labs(title = "UMAP Plot by Clusters (res0.25 k50)", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_clusters_res0.2_k200.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = doublets)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by doublets", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_doublets.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Day)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Day", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_day.png")
+
+sample_colours <- c(
+"#7166d9",
+"#58c655",
+"#af57c6",
+"#acbb37",
+"#d149ac",
+"#5ea136",
+"#d9407f",
+"#6fc480",
+"#d83b52",
+"#4ebfa9",
+"#bf3c24",
+"#46aed7",
+"#e0752d",
+"#7293dd",
+"#d29e37",
+"#5d64ac",
+"#838c26",
+"#c88ed9",
+"#3c9153",
+"#964d88",
+"#53772f",
+"#e9b508",
+"#ca88ca",
+"#45953f"
+)
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Sample)) +
+  geom_point(size = 0.4, alpha = 0.5) + 
+  scale_color_manual(values=sample_colours, name = "sample") +
+  labs(title = "UMAP Plot by Sample", x = "HAR1", y = "HAR2") + 
+  theme_minimal() + coord_fixed() +  
+  theme(legend.title = element_blank()) +guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_sample.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Batch)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Batch", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_batch.png")
+
+ggplot(df, aes(x = UMAP1, y = UMAP2, color = Replicate)) +
+  geom_point(size = 0.4, alpha = 0.5) +  
+  labs(title = "UMAP Plot by Replicate", x = "UMAP1", y = "UMAP2") + 
+  theme_minimal() + coord_fixed() + 
+  theme(legend.title = element_blank())  +guides(scolor = guide_legend(override.aes = list(size = 4)))
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_replicate.png")
+
+-------------------------------------------------------------------------------------------------------------------------------------
+umap_data <- as.data.frame(p2$embeddings$PCA_harmony_batch$UMAP_harmony_batch)
+df <- data.frame(
+  UMAP1 = umap_data[, 1],  
+  UMAP2 = umap_data[, 2],  
+  Day = as.factor(p2$depth$day_M),
+  Batch = as.factor(p2$depth$batch_M),
+  Replicate = as.factor(p2$depth$replicate_M),
+  Sample = as.factor(p2$depth$sample_name_M),
+  Clusters = p2$clusters$PCA_harmony_batch$multilevel
+)
+
+#plotting eachd ay on separate umap
+unique_days <- sort(unique(df$Day))
+plot_list <- list()
+for (day in unique_days) {
+  df$highlight <- ifelse(df$Day == day, as.character(day), "gray")
+  p <- ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(data = df %>% filter(Day != day), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Day == day), aes(color = "red"), size = 0.4, alpha = 0.7) +
+    labs(title = paste("Day", day)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + 
+    coord_fixed() +
+    theme(legend.position = "none")
+  plot_list[[as.character(day)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 4)
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_day_grid.png", plot = final_plot, width = 12, height = 10)
+
+unique_samples <- sort(unique(df$Sample))
+plot_list <- list()
+for (sample in unique_samples) {
+  df$highlight <- ifelse(df$Sample == sample, as.character(sample), "gray")
+  
+   p <- ggplot(df, aes(x = UMAP1, y = UMAP2))  +
+    geom_point(data = df %>% filter(Sample != sample), aes(color = "gray"), size = 0.4, alpha = 0.5) +
+    geom_point(data = df %>% filter(Sample == sample), aes(color = "red"), size = 0.4, alpha = 0.7) +
+    labs(title = paste("Sample", sample)) +
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +
+    theme_minimal() +
+    coord_fixed() 
+    theme(legend.position = "none")
+  
+  plot_list[[as.character(sample)]] <- p
+}
+
+final_plot <- wrap_plots(plot_list, ncol = 4)
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_sample_grid.png", plot = final_plot, width = 12, height = 10)
+
+
+#plotting batches seprately on the same umap
+batches <- unique(df$Batch)
+plot_list <- list()
+for (batch in batches) {
+  df$highlight <- ifelse(df$Day == batch, as.character(batch), "gray")
+  p <- ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(data = df %>% filter(Batch != batch), aes(color = "gray"), size = 0.4, alpha = 0.5) +  
+    geom_point(data = df %>% filter(Batch == batch), aes(color = "red"), size = 0.4, alpha = 0.5) +
+    labs(title = paste("Batch", batch)) +  
+    scale_color_manual(values = c("gray" = "gray", "red" = "red")) +  
+    theme_minimal() + coord_fixed() +  
+    theme(legend.position = "none")
+  plot_list[[as.character(batch)]] <- p
+}
+final_plot <- wrap_plots(plot_list, ncol = 2)
+ggsave("umap_mouse_pagoda2_basicP2proc_filt100_mt4perc_clus1_harmony_batch_grid.png", plot = final_plot, width = 12, height = 10)
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+plot_gene_expression_UMAP <- function(pagoda2_object, gene_name, embedding_name) {
+  harmony_data <- as.data.frame(pagoda2_object$embeddings$PCA_harmony_batch[[embedding_name]])
+  gene_expression <- pagoda2_object$counts[, gene_name]
+  
+  if (is.null(gene_expression)) {
+    stop(paste("Gene", gene_name, "not found in the counts matrix."))
+  }
+  
+  df <- data.frame(
+    UMAP1 = harmony_data[, 1],  
+    UMAP2 = harmony_data[, 2],  
+    Sample = as.factor(pagoda2_object$depth$sample_name_M),  
+    GeneExpression = gene_expression  
+  )
+  
+  df <- df[order(df$GeneExpression, decreasing = FALSE), ]
+  
+  plot <- ggplot(df, aes(x = UMAP1, y = UMAP2, color = GeneExpression)) +
+    geom_point(alpha = 0.5, size = 0.4) + 
+    scale_color_gradient(low = "grey", high = "red") +  
+    labs(title = paste(gene_name, "Expression"), 
+         x = "UMAP1", 
+         y = "UMAP2", 
+         color = "Gene Expression") +  
+    theme_minimal() + coord_fixed() +  
+    theme(legend.title = element_blank()) + 
+    guides(color = guide_legend(override.aes = list(size = 4)))
+  
+  return(plot)
+}
+
+
+
+plotGeneGroupsOnUMAP <- function(gene_groups, embedding_name, data_object) {
+  for (group_name in names(gene_groups)) {
+    gene_names <- gene_groups[[group_name]] 
+    plots_list <- list() 
+    
+    for (gene in gene_names) {
+      plot <- plot_gene_expression_UMAP(data_object, gene, embedding_name)
+      plots_list[[gene]] <- plot
+    }
+    
+    combined_plot <- wrap_plots(plots_list, ncol = 3)
+    
+    output_filename <- paste0("umap_filt100_mt4perc_clus1_harmony_", group_name, "_expression.png")
+    ggsave(output_filename, combined_plot, width = 15, height = 10)
+  }
+}
+
+gene_groups <- list(
+  progenitor_markers = c("Sox2", "Pax6", "Nes", "Hopx", "Eomes"),  
+  dividing_cells = c("Cenpe", "Mki67"),
+  postmitotic_neurons = c("Neurod1", "Neurod2", "Dcx", "Map2", "Tubb3", "Rbfox3"),
+  deep_layer_neurons = c("Fezf2", "Bcl11b", "Tbr1"),
+  upper_layer_neurons = c("Cux1", "Rorb", "Satb1"),
+  interneurons = c("Gad1", "Gad2", "Slc6a1", "Dlx1"),
+  axon_development = c("Gap43", "L1cam", "Efnb3", "Ank3", "Trim46", "Nfasc"),
+  synapse = c("Syp", "Grin1", "Grin2a", "Camk2b"),
+  brain_regions = c("Foxg1", "Otx2", "Gbx2",  "Lhx2", "Tcf7l2"),
+  cerebral_cortex = c("Foxg1","Neurod6",  "Emx2", "Tbr1", "Rel", "Pax6", "Six3"),
+  cell_cycle = c("Pcna", "Top2a", "Mcm6", "Mki67"),
+  s_genes = c( "Atp6v1b2", "Bcl2l1", "Klf4", "Gstm2"),
+  g2m_genes = c("Ncapd2", "Cenpf", "Cdc25a", "Kif2c", "Tubg1", "Prc1"),
+  oligodendrocyte_progenitors = c("Olig2", "Sox10", "Pdgfra"),
+  oligodendrocyte_mature = c("Mbp", "Mog", "Mag", "Plp1", "Cmpk1", "Galc"),
+  glycolytic = c("Pfkfb3", "Aldoc", "Ldha", "Slc16a1", "Slc16a3", "Ldha", "Fbp1"),
+  astrocytes_tf = c("Nkx6-1", "Nfix", "Sox9", "Nfia", "Nfib"),
+  astrocytes_metabolic_markers = c("S100b", "Gpam", "Cpt1a", "Cpt2", "Pdk4", "Gk", "Gys1", "Abhd5"),
+  astrocytes_structural = c("Fmn2", "Nebl", "Synpo2", "Vim", "Gfap", "Aldh1l1", "Aqp4", "Slc1a3", "Sparc", "Thbs1"),
+  early_RG = c("Lix1", "Hmga2"),
+  aRG = c("Fbxo32", "Prom1", "Pard3", "Palld"),
+  bRG = c("Moxd1", "Ptn", "Tnc", "Hopx", "Lifr", "Fam107a", "Stat3", "Sema5a", "Etv5", "Nog", "Carhsp1", "Il6st", "Lgals3bp", "Itgb5", "Fbn2", "Sparcl1", "Ptprz1"), 
+  calcium = c("Grin2a", "Marcks", "Cacna1c", "Cacna1d", "Nfasc")
+)
+
+
+plotGeneGroupsOnUMAP(gene_groups, "UMAP", p2)
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_sce_filt100_mt4perc_clustRes0.2.rds")
+
+#in a separte R session 
+library(remotes)
+remotes::install_github("carmonalab/UCell", ref="v2.2")
+library(UCell)
+sce <- readRDS("/data2/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_sce_filt100_mt4perc_clustRes0.2.rds")
+gene.sets <- list(s.genes <- c(
+  "Mcm5", "Pcna", "Tyms", "Fen1", "Mcm2", "Mcm4", "Rrm1", "Ung", "Gins2", "Mcm6",
+  "Cdca7", "Dtl", "Prim1", "Uhrf1", "Cenpu", "Hells", "Rfc2", "Rpa2", "Nasp", "Rad51ap1",
+  "Gmnn", "Wdr76", "Slbp", "Ccne2", "Ubr7", "Pold3", "Msh2", "Atad2", "Rad51", "Rrm2",
+  "Cdc45", "Cdc6", "Exo1", "Tipin", "Dscc1", "Blm", "Casp8ap2", "Usp1", "Clspn", "Pola1",
+  "Chaf1b", "Brip1", "E2f8"),
+  g2m.genes <- c(
+  "Hmgb2", "Cdk1", "Nusap1", "Ube2c", "Birc5", "Tpx2", "Top2a", "Ndc80", "Cks2", "Nuf2",
+  "Cks1b", "Mki67", "Tmpo", "Cenpf", "Tacc3", "Pimreg", "Smc4", "Ccnb2", "Ckap2l", "Ckap2",
+  "Aurkb", "Bub1", "Kif11", "Anp32e", "Tubb4b", "Gtse1", "Kif20b", "Hjurp", "Cdca3", "Jpt1",
+  "Cdc20", "Ttk", "Cdc25c", "Kif2c", "Rangap1", "Ncapd2", "Dlgap5", "Cdca2", "Cdca8", "Ect2",
+  "Kif23", "Hmmr", "Aurka", "Psrc1", "Anln", "Lbr", "Ckap5", "Cenpe", "Ctcf", "Nek2",
+  "G2e3", "Gas2l3", "Cbx5", "Cenpa")
+)
+scores <- ScoreSignatures_UCell(sce, features=gene.sets)
+head(scores)
+colData(sce)$phase <- scores 
+
+
+
+----------------------------------------------------------------------------------------------------------------------------------
+
+plot_gene_expression_on_umap_grey_red <- function(pagoda2_object, gene_name, embedding_name) {
+  harmony_data <- as.data.frame(pagoda2_object$embeddings$PCA_harmony_batch[[embedding_name]])
+  gene_expression <- pagoda2_object$counts[, gene_name]
+  
+  if (is.null(gene_expression)) {
+    stop(paste("Gene", gene_name, "not found in the counts matrix."))
+  }
+  
+  df <- data.frame(
+    UMAP1 = harmony_data[, 1],  
+    UMAP2 = harmony_data[, 2],  
+    Sample = as.factor(pagoda2_object$depth$sample_name_M),  
+    GeneExpression = gene_expression  
+  )
+  
+  df <- df[order(df$GeneExpression, decreasing = FALSE), ]
+  
+  plot <- ggplot(df, aes(x = UMAP1, y = UMAP2, color = GeneExpression)) +
+    geom_point(alpha = 0.5, size = 0.4) + 
+    scale_color_gradient(low = "grey", high = "red") +  
+    labs(title = paste(gene_name, "Expression"), 
+         x = "UMAP1", 
+         y = "UMAP2", 
+         color = "Gene Expression") +  
+    theme_minimal() + coord_fixed() +  
+    theme(legend.title = element_blank()) 
+
+  
+  return(plot)
+}
+
+plotGeneGroupsOnUMAP <- function(gene_groups, embedding_name, data_object) {
+  for (group_name in names(gene_groups)) {
+    gene_names <- gene_groups[[group_name]] 
+    plots_list <- list() 
+    
+    for (gene in gene_names) {
+      plot <- plot_gene_expression_on_umap_grey_red(data_object, gene, embedding_name)
+      plots_list[[gene]] <- plot
+    }
+    
+    combined_plot <- wrap_plots(plots_list, ncol = 3)
+    
+    output_filename <- paste0("umap_filt100_mt4perc_clust1_harmony_", group_name, "_expression.png")
+    ggsave(output_filename, combined_plot, width = 15, height = 10)
+  }
+}
+
+gene_groups <- list(CalciumReceptors = c("Cacna1c", "Grin2b", "Gria3", "Gria1"),
+MaturationMarkers = c("Syp", "Homer1", "Dlg4", "Slc32a1", "Trim46", "Gfap", "Rbfox3", "Gapdh")
+)
+
+gene_groups <- list(
+  dividing_cells = c("Cenpe", "Mki67"),
+  postmitotic_neurons = c("Neurod1", "Neurod2", "Dcx", "Map2", "Tubb3", "Rbfox3"),
+  deep_layer_neurons = c("Fezf2", "Bcl11b", "Tbr1"),
+  upper_layer_neurons = c("Cux1", "Rorb", "Satb1"),
+  interneurons = c("Gad1", "Gad2", "Slc6a1", "Dlx1"),
+  axon_development = c("Gap43", "L1cam", "Efnb3", "Ank3", "Trim46", "Nfasc"),
+  synapse = c("Syp", "Grin1", "Grin2a", "Camk2b"),
+  brain_regions = c("Foxg1", "Otx2", "Gbx2",  "Lhx2", "Tcf7l2"),
+  cerebral_cortex = c("Foxg1","Neurod6",  "Emx2", "Tbr1", "Rel", "Pax6", "Six3"),
+  cell_cycle = c("Pcna", "Top2a", "Mcm6", "Mki67"),
+  s_genes = c( "Atp6v1b2", "Bcl2l1", "Klf4", "Gstm2"),
+  g2m_genes = c("Ncapd2", "Cenpf", "Cdc25a", "Kif2c", "Tubg1", "Prc1"),
+  oligodendrocyte_progenitors = c("Olig2", "Sox10", "Pdgfra"),
+  oligodendrocyte_mature = c("Mbp", "Mog", "Mag", "Plp1", "Cmpk1", "Galc"),
+  glycolytic = c("Pfkfb3", "Aldoc", "Ldha", "Slc16a1", "Slc16a3", "Ldha", "Fbp1"),
+  astrocytes_tf = c("Nkx6-1", "Nfix", "Sox9", "Nfia", "Nfib"),
+  astrocytes_metabolic_markers = c("S100b", "Gpam", "Cpt1a", "Cpt2", "Pdk4", "Gk", "Gys1", "Abhd5"),
+  astrocytes_structural = c("Fmn2", "Nebl", "Synpo2", "Vim", "Gfap", "Aldh1l1", "Aqp4", "Slc1a3", "Sparc", "Thbs1"),
+  early_RG = c("Lix1", "Hmga2"),
+  aRG = c("Fbxo32", "Prom1", "Pard3", "Palld"),
+  bRG = c("Moxd1", "Ptn", "Tnc", "Hopx", "Lifr", "Fam107a", "Stat3", "Sema5a", "Etv5", "Nog", "Carhsp1", "Il6st", "Lgals3bp", "Itgb5", "Fbn2", "Sparcl1", "Ptprz1"), 
+  calcium = c("Grin2a", "Marcks", "Cacna1c", "Cacna1d", "Nfasc"),
+  postmytotic_stageI_neurons = c("Dcx", "Tubb3", "Neurod1", "Cux2", "Tbr1", "Rbfox3", "Map2"),
+  axongenesis_stageII_neurons1 = c( "Map2", "Efna2", "Efna3", "Efna5", "Efnb3", "Sema3a", "Sema7a","Ncam1", "Gap43","Nefh"),
+  axongenesis_stageII_neurons2 = c("Marcks", "L1cam", "Slit1", "Ank3", "Nfasc", "Sptbn4", "Trim46", "Cntn2", "Kcnq3", "Scn2a"),
+  calcium_channels1 = c("Cacna1c", "Cacna1d", "Cacna1s", "Cacna1f",  "Cacna1a", "Cacna1b", "Cacna1e","Cacna1g", "Cacna1h"),
+  calcium_channels2 = c("Cacna1i", "Cacnb1", "Cacnb2", "Cacnb3", "Cacnb4", "Cacng1", "Cacng2", "Cacng3", "Cacng4"),
+   calcium_channels3 = c("Cacng5", "Cacng6", "Cacng7","Cacng8",  "Cacna2d1", "Cacna2d2", "Cacna2d3", "Cacna2d4")
+)
+
+)
+
+gene_groups <- list(
+  progenitor_markers = c("Sox2", "Pax6", "Nes", "Hopx", "Eomes"),
+  postmitotic_neurons = c("Neurod1", "Neurod2", "Dcx", "Map2", "Tubb3", "Rbfox3"),
+  deep_layer_neurons = c("Fezf2", "Bcl11b", "Tbr1"),
+  upper_layer_neurons = c("Cux1", "Rorb", "Satb1"),
+  interneurons = c("Gad1", "Gad2", "Slc6a1", "Dlx1"),
+  axon_development = c("Gap43", "L1cam", "Efnb3", "Ank3", "Trim46", "Nfasc"),
+  synapse = c("Syp", "Grin1", "Grin2a", "Camk2b"),
+  brain_regions = c("Foxg1", "Otx2", "Gbx2",  "Lhx2", "Tcf7l2"),
+  glycoytic_enzymes = c("Hk2", "Pkm", "Pfkp", "Pgk1", "Eno1"),
+  pyruvaye_lactate_enzymes = c( "Mpc1", "Mpc2",  "Ldha", "Slc16a1", "Slc16a3"), 
+  calcium = c("Grin2a", "Marcks", "Cacna1c", "Cacna1d", "Nfasc"), 
+  early_trafficing = c("Syt3", "Syt11", "Syn3", "Syt7"),
+  early_transm_chanel = c("Cacna1c", "Grin2b", "Gria2", "Gria3", "Gria1", "Gabra3", "Gabrb3", "Grm7", "Grm3", "Grm2", "Grm5"),
+  early_scaffoldadhesion = c("Homer3", "Pclo", "Nlgn1", "Nlgn2", "Nrxn1", "Nrxn2"),
+  late_trafficing = c("Cacna1c", "Grin2b", "Gria2", "Gria3", "Gria1", "Gabra3", "Gabrb3", "Grm7", "Grm3", "Grm2", "Grm5"),
+  late_transm_chanel = c("Homer3", "Pclo", "Nlgn1", "Nlgn2", "Nrxn1", "Nrxn2"),
+  late_scaffold = c("Vamp2", "Syn2", "Sv2a", "Syn1", "Vamp3", "Sv2b", "Syt1", "Sncb", "Syngr1", "Syp", "Syngr3", "Stxbp1", "Snca", "Syt17", "Slc17a7"),
+  late_adhesion = c("Nlgn3", "Nrxn2")
+) 
+  
+
+#postmytotic_stageIII_neurons = c("Tubb3", "Cux2", "Rbfox3", "Map2", "Efna3", "Efnb3", "Sema7a", "Ncam1", "Gap43", "Marcks", 
+ # "L1cam", "Slit1", "Ank3", "Nfasc", "Sptbn4", "Trim46", "Cntn2", "Kcnq3", "Scn2a", "Nefh", 
+#  "Bsn", "Pclo", "Syp", "Snca", "Sncb", "Syn1", "Syn2", "Sv2b", "Stx1a", "Stxbp1", "Vamp2", 
+#  "Vamp3", "Syt1", "Syt3", "Syt17", "Syngr1", "Syngr3", "Slc17a7", "Nrxn2", "Nptn", "Grin2a", 
+ # "Gria4", "Dlgap1", "Shank1", "Shank3", "Dlg1", "Syngap1", "Camk2a", "Camk2b", "Cacna1c", 
+#  "Slc1a2")
+
+plotGeneGroupsOnUMAP(gene_groups, "UMAP_harmony_batch", p2)
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+#differential expression analysis. 
+p2$getDifferentialGenes(type='PCA_harmony_batch', verbose=TRUE, clusterType='multilevel')
+
+for (cluster_num in 1:4 ) {
+    de <- p2$diffgenes$PCA_harmony_batch[[1]][[as.character(cluster_num)]]
+    genes <- rownames(de)[1:15]
+    expression_data <- as.matrix(p2$counts[, genes])
+    
+    expression_df <- as.data.frame(expression_data)
+    expression_df$Sample <- rownames(expression_df) 
+    
+    library(reshape2)
+    long_df <- melt(expression_df, id.vars = "Sample", variable.name = "Gene", value.name = "Expression")
+    long_df$Cluster <- p2$clusters$PCA_harmony_batch[[1]][long_df$Sample]
+    long_df$Cluster <- factor(long_df$Cluster) 
+    
+    sample_order <- long_df %>%
+      group_by(Sample) %>%
+      summarize(Cluster = unique(Cluster)) %>%
+      arrange(Cluster) %>%
+      pull(Sample)
+    
+    long_df$Sample <- factor(long_df$Sample, levels = sample_order)
+    long_df <- long_df %>% arrange(Sample)
+    
+    cluster_positions <- long_df %>%
+      group_by(Cluster) %>%
+      summarize(StartSample = min(as.numeric(factor(Sample, levels = sample_order))),
+                EndSample = max(as.numeric(factor(Sample, levels = sample_order))),
+                .groups = 'drop') %>%
+      mutate(EndSample = EndSample + 0.5) 
+    
+    heatmap_plot <- ggplot(long_df, aes(x = Sample, y = Gene, fill = Expression)) +
+    geom_tile() +                                   
+    scale_fill_viridis_c() +                        
+    labs(title = paste("Differentially Expressed Genes: Cluster", cluster_num), 
+         x = "Samples Ordered by Cluster", 
+         y = "Gene") +
+    theme(axis.text.x = element_blank(), axis.title.x = element_blank()) +
+    theme_minimal() +
+    geom_vline(data = cluster_positions, aes(xintercept = EndSample), 
+               linetype = "dashed", 
+               color = "white", 
+               size = 0.5)
+  
+  ggsave(paste0("heatmap_mouse_basicP2proc_filt10_mt4perc_harmony_DGE_cluster_k200_res0.2", cluster_num, ".png"), plot = heatmap_plot)
+}
+
+----------------------------------------------------------------------------------------------------------------------------------
+
+
+chosen_genes <- list(
+  "DCX", "TUBB3", "NEUROD1", "CUX2", "TBR1", "RBFOX3", "MAP2", 
+  "EFNA2", "EFNA3", "EFNA5", "EFNB3", "SEMA3A", "SEMA7A", "NCAM1", 
+  "GAP43", "Marcks", "L1CAM", "SLIT1", "ANK3", "NFASC", "SPTBN4", 
+  "TRIM46", "CNTN2", "KCNQ3", "SCN2A", "NEFH", "BSN", "PCLO", "SYP", 
+  "SNCA", "SNCB", "SYN1", "SYN2", "SV2B", "STX1A", "STXBP1", "VAMP2", 
+  "VAMP3", "SYT1", "SYT3", "SYT17", "SYNGR1", "SYNGR3", "SLC17A7", 
+  "NRXN2", "NPTN", "GRIN1", "GRIN2a", "GRIA4", "DLGAP1", "SHANK1", 
+  "SHANK3", "DLG1", "SYNGAP1", "CAMK2A", "CAMK2B", "CACNA1C", "CACNA1D", 
+  "STX1A"
+)
+
+chosen_genes <- c(
+  "Dcx", "Tubb3", "Neurod1", "Cux2", "Tbr1", "Rbfox3", "Map2", 
+  "Efna2", "Efna3", "Efna5", "Efnb3", "Sema3a", "Sema7a", "Ncam1", 
+  "Gap43", "Marcks", "L1cam", "Slit1", "Ank3", "Nfasc", "Sptbn4", 
+  "Trim46", "Cntn2", "Kcnq3", "Scn2a", "Nefh", "Bsn", "Pclo", "Syp", 
+  "Snca", "Sncb", "Syn1", "Syn2", "Sv2b", "Stx1a", "Stxbp1", "Vamp2", 
+  "Vamp3", "Syt1", "Syt3", "Syt17", "Syngr1", "Syngr3", "Slc17a7", 
+  "Nrxn2", "Nptn", "Grin1", "Grin2a", "Gria4", "Dlgap1", "Shank1", 
+  "Shank3", "Dlg1", "Syngap1", "Camk2a", "Camk2b", "Cacna1c", "Cacna1d", 
+  "Stx1a"
+)
+
+p2$calculatePcaReduction(nPcs=20, odgenes= chosen_genes, name = "PCA_chosen")
+p2$getEmbedding(type = "PCA_chosen", embeddingType = "UMAP", n_neighbors = 30, min_dist = 0.3, verbose = TRUE, name ="UMAP_chosen")
+
+p2$makeKnnGraph(k=50, type='PCA_chosen', center=TRUE, distance='cosine')
+p2$getKnnClusters(method=multilevel.community,type='PCA_chosen',name='multilevel', resolution = 0.3)
+------------------------------------------------------------------------------------------------------------------------------------------------------
+#heatmaps of gene expression at different timepoitns
+
+df_set2 <- as.data.frame(cbind(timepoints, counts_matrix[,genes_set2]))
+average_expression_set2 <- df_set2 %>%
+  group_by(timepoints) %>%
+  summarise(across(c(Syp, Homer1, Dlg4, Slc32a1, Trim46, Gfap), \(x) mean(x, na.rm = TRUE)))
+
+counts_matrix <- as.data.frame(as.matrix(p2$counts))
+genes_set1 <- intersect(genes_set1, colnames(counts_matrix))
+genes_set2 <- intersect(genes_set2, colnames(counts_matrix))
+timepoints <- p2$depth$day_M
+
+df_set1 <- as.data.frame(cbind(timepoints, counts_matrix[,genes_set1]))
+
+average_expression_set1 <- df_set1 %>%
+  group_by(timepoints) %>%
+  summarise(across(c(Cacna1c, Grin2b, Gria3, Gria1), \(x) mean(x, na.rm = TRUE)))
+
+average_expression_set1_wide <- average_expression_set1 %>%
+  column_to_rownames("timepoints") %>% 
+  t() 
+
+color_palette <- colorRampPalette(
+  colors = c("blue", "green", "yellow"), 
+  bias = 1.2,)(30)                      
+
+png("heatmap_mouse_basicP2proc_filt100_mt4perc_CalciumReceptors.png", width = 1000, height = 400)  
+pheatmap(
+  average_expression_set1_wide,
+  cluster_rows = TRUE, 
+  cluster_cols = FALSE,
+  color = color_palette,
+  main = "Calcium Receptors",
+  border_color = NA 
+)
+dev.off()
+
+
+ggplot(average_expression_set2_long, aes(x = timepoints, y = gene, fill = expression)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "blue", high = "yellow") +
+  labs(title = "Calcium Receptors", x = "Time Points", y = "Genes") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("heatmap_mouse_basicP2proc_filt100_mt4perc_MaturationStages.png")
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+#ploting genes on a heatmap 
+library(dplyr)
+library(pheatmap)
+library(tibble)
+library(Matrix)
+library(tidyr)
+
+
+plot_heatmap <- function(gene_list, counts_matrix, timepoints, file_name) {
+  
+  genes_to_plot <- intersect(gene_list, colnames(counts_matrix))
+  counts_matrix_subset <- counts_matrix[, genes_to_plot]
+  counts_matrix_subset <- as.data.frame(as.matrix(counts_matrix_subset))
+  
+  # Create a data frame with the selected genes and timepoints
+  df <- as.data.frame(cbind(timepoints, counts_matrix_subset))
+  
+  # Calculate average expression per timepoint for each gene
+  average_expression <- df %>%
+    group_by(timepoints) %>%
+    summarise(across(all_of(genes_to_plot), ~ mean(.x, na.rm = TRUE)))
+  
+  # Transform the data frame to have genes as rows and timepoints as columns
+  average_expression_wide <- average_expression %>%
+    column_to_rownames("timepoints") %>%  # Set timepoints as rownames
+    t()                                  # Transpose to have genes as rows
+  
+  # Define a color palette with bias for smooth transition
+  color_palette <- colorRampPalette(
+    colors = c("blue", "green", "yellow"), 
+    bias = 1.2
+  )(30)
+  
+  # Plot the heatmap and save to file
+  png(file_name, width = 1000, height = 400)
+  pheatmap(
+    average_expression_wide,
+    cluster_rows = TRUE, 
+    cluster_cols = FALSE,     # Disable clustering on columns as per example
+    color = color_palette,
+    main = "Average Gene Expression by Timepoint",
+    border_color = NA        # Remove gridlines for a clean look
+  )
+  dev.off()
+}
+
+p2 <- readRDS("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc.rds")
+CalciumReceptors <- c("Cacna1c", "Grin2b", "Gria3", "Gria1")
+MaturationMarkers <- c("Syp", "Homer1", "Dlg4", "Slc32a1", "Trim46", "Gfap", "Rbfox3", "Gapdh")
+
+plot_heatmap(
+  gene_list = MaturationMarkers, 
+  counts_matrix = p2$counts, 
+  timepoints = p2$depth$day_M, 
+  file_name = "heatmap_mouse_basicP2proc_filt100_mt4perc_cortical_dev_subset_MaturationMarkers.png"
+)
+
+p2 <- readRDS("/mnt/hanna/axonoutgrowth/mouse2/pagoda2/analysis/objects/mouse_basicP2proc_filt100_mt4perc_clust1.rds")
+plot_heatmap(
+  gene_list = CalciumReceptors, 
+  counts_matrix = p2$counts, 
+  timepoints = p2$depth$day_M, 
+  file_name = "heatmap_mouse_basicP2proc_filt100_mt4perc_cortical_dev_subset_CalciumReceptors.png"
+)

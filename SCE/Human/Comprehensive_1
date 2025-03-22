@@ -1,0 +1,561 @@
+#intial run has been saved to /mnt/hanna/axonoutgrowth/human2/initial 
+#correction (with mt.fraction set to 0.2 intead of 0.03) run has been saved to /mnt/hanna/axonoutgrowth/human2/correction 
+#correction2 (with sample 1_61_2 and 1_67_1 removed and a top filter = complexity > 0.9)) run has been saved to /mnt/hanna/axonoutgrowth/human2/correction 
+
+
+#QC
+library(BiocParallel)
+library(scran)
+library(irlba)
+library(Rtsne)
+library(Matrix)
+library(httpgd)
+library(ggplot2)
+library(biomaRt)
+library(viridisLite)
+library(viridis)
+library(scDblFinder)
+library(umap)
+library(celda)
+library(igraph)
+library(leiden)
+
+library(DropletUtils)
+library(scater)
+library(ensembldb)
+library(AnnotationHub)
+library(BiocParallel)
+library(tidyverse)
+library(patchwork)
+library(ggvenn)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/initial/QC/sce_before_filters_treshold.rds")
+colData(sce)$complexity <- colSums(counts(sce)>0)/colSums(counts(sce))
+
+# summary(sce$complexity)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.01202 0.91870 0.95652 0.94593 1.00000 1.00000 
+
+mt.lim <- 0.2
+rb.lim <- 0.1
+ngene.lim <-500
+lib.size.lim <- 1000
+
+
+sce.filtered <- sce[, sce$mt.fraction < mt.lim & sce$rb.fraction < rb.lim & sce$gene_count > ngene.lim & sce$tscp_count > lib.size.lim]
+dim(sce.filtered)
+#47527 26885
+# dim(sce.filtered) [1] 47527 26885
+# summary(sce.filtered$complexity)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.01202 0.42670 0.60236 0.55809 0.70914 0.88774 
+
+#removing smapels 1_61_2 and 1_67_1
+samples_filter <- colData(sce.filtered)[sce.filtered$SampleName != "1_67_1",] 
+samples_filter <- samples_filter[samples_filter$SampleName != "1_61_2",] 
+samples_filter <- samples_filter$bc_wells
+sce.tmp <- sce.filtered[,samples_filter]
+dim(sce.tmp)
+[1] 47527 19516
+bp <- MulticoreParam(25, RNGseed=1234)
+      bpstart(bp)
+sce.ftmp<- scDblFinder(sce.tmp, samples="bc1_well", dbr=.05, dims=10, BPPARAM=bp)
+      bpstop(bp)
+      table(sce.tmp$scDblFinder.class)
+# singlet doublet 
+#   17744    1772
+
+sce.filt <- sce.tmp[,colData(sce.tmp)$scDblFinder.class == "singlet"]
+dim(sce.filt)
+# 47527 17744
+
+plot_df <- colData(sce.filt)
+ggplot(plot_df, aes (x = factor(SampleName), y = as.numeric(lib.sizes))) +
+  geom_boxplot() +
+  theme_bw() +  coord_flip() +
+  labs(x = "Sample", y = "Number of UMIs") +
+  scale_y_log10(breaks = c(100, 1000, 5000, 10000, 50000, 100000),
+    labels = c("100","1,000", "5,000", "10,000", "50,000", "100,000"))
+ggsave("box-whisker_plot_lib.szies_postQC.pdf")
+
+saveRDS(sce.filt, "/mnt/hanna/axonoutgrowth/human2/correction2/sce_after_QC_correction.rds")
+
+
+
+
+
+############################################################################################################################################################################################################################################################
+#decontX
+library(BiocParallel)
+library(scran)
+library(irlba)
+library(Rtsne)
+library(Matrix)
+library(ggplot2)
+library(biomaRt)
+library(viridisLite)
+library(viridis)
+library(scDblFinder)
+library(umap)
+library(celda)
+library(patchwork)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/correction2/sce_after_QC_correction.rds")
+#sce <- readRDS( "/mnt/hanna/axonoutgrowth/human2/correction2/sce_clusters_correction.rds")
+
+sce.delta<- decontX(sce)
+
+saveRDS(sce.delta, "/mnt/hanna/axonoutgrowth/human2/correction2/sce_decontX_corrected.rds")
+
+
+
+
+############################################################################################################################################################################################################################################################
+#Norm
+library(scater)
+library(scran)
+library(sctransform)
+library(tidyverse)
+library(BiocParallel)
+library(patchwork)
+bpp <- MulticoreParam(7)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/corrections/sce_decontX_corrected.rds")
+
+#non-decontaminated counts 
+#saving the pre-normalised coutns by cell barcode
+colData(sce)$sum_before_norm <- colSums(counts(sce))
+beforeNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_before_norm) %>% 
+  mutate(cell_num = 1:n())
+
+p_before_nom <- ggplot(data=beforeNorm, aes(x=cell_num, y=log(sum_before_norm))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='Log(Cell UMI counts)',
+        title = "All Samples: Before Normalization" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_before_nom
+
+pdf("/mnt/hanna/axonoutgrowth/human2/corrections/countsVsBarcodes_before_normalisation.pdf")
+p_before_nom
+dev.off()
+
+#Scaling 
+#size factors 
+lib.sf <- librarySizeFactors(sce)
+sce <- logNormCounts(sce, size.factors = lib.sf)
+
+colData(sce)$sum_after_norm <- colSums(assay(sce, "logcounts"))
+afterNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_after_norm) %>% 
+  mutate(cell_num = 1:n())
+
+p_after_nom <- ggplot(data=afterNorm, aes(x=cell_num, y=log(sum_after_norm))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell UMI counts)',
+        title = "All Samples: After Normalization" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_after_nom
+
+pdf("/mnt/hanna/axonoutgrowth/human2/corrections/countsVsBarcodes_after_normalisation.pdf")
+p_after_nom
+dev.off()
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/corrections/sce_after_Norm_correction.rds")
+
+
+
+
+
+
+#decontaminated counts
+colData(sce)$sum_decontX <- colSums(assay(sce, "decontXcounts"))
+beforeNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName, bc_wells, sum_decontX) %>% 
+  mutate(cell_num = 1:n())
+
+p_before_nom <- ggplot(data=beforeNorm, aes(x=cell_num, y=log(sum_decontX))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell decontX counts)',
+        title = "All Samples: Before Normalization (decontXcounts)" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_before_nom
+
+pdf("countsVsBarcodes_before_normalisation_decontX.pdf")
+p_before_nom
+dev.off()
+
+#scaling using lib.sizes 
+lib.sf <- librarySizeFactors(sce, assay.type = "decontXcounts")
+sce <- logNormCounts(sce, size.factors=lib.sf, assay.type= "decontXcounts", name = "decontXlogcounts")
+
+#data after normalisation
+colData(sce)$sum_decontXlogcounts <- colSums(assay(sce, "decontXlogcounts"))
+afterNorm <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(SampleName,bc_wells, sum_decontXlogcounts) %>% 
+  mutate(cell_num = 1:n())
+
+p_after_nom <- ggplot(data=afterNorm, aes(x=cell_num, y=log(sum_decontXlogcounts))) +
+  geom_bar(stat = 'identity') +
+  labs( x= 'Cell Index',
+        y='log(Cell decontXlogcounts)',
+        title = "All Samples: After Normalization (decontXcounts)" ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20, color = 'red')
+  )
+p_after_nom
+
+pdf("countsVsBarcodes_after_normalisation_decontX.pdf")
+p_after_nom
+dev.off()
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/correction2/sce_Norm_after_decontXNorm_correction2.rds")
+
+
+
+
+
+
+
+
+############################################################################################################################################################################################################################################################
+#DimRed
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/corrections/sce_Norm_after_decontXNorm_correction.rds")
+
+#to easier look at the genes/features selecred lets use the symbols. 
+rownames(sce) <- uniquifyFeatureNames(rownames(sce), rowData(sce)$gene_name)
+
+
+#non-decontaminated counts
+#modeling gene variation in the cells 
+gene_var <- modelGeneVar(sce, assay.type="logcounts")
+hvgs <- getTopHVGs(gene_var, prop=0.1)
+length(hvgs)
+#1871
+sce <- runPCA(sce, subset_row = hvgs)
+
+#how much variance is explained by different PCs.
+percent.var <- attr(reducedDim(sce, "PCA"), "percentVar")
+pdf("variance_explaiend_PCA.pdf")
+plot(percent.var, log = "y", xlab = "PC", ylab = "Variance explained (%)")
+dev.off()
+
+percent.var
+#  [1] 9.2323064 3.9833357 3.0626041 2.2739871 1.1732705 1.0098763 0.8141493
+#  [8] 0.5979129 0.5569384 0.4870508 0.3883432 0.3708851 0.3052809 0.2855912
+# [15] 0.2698909 0.2545783 0.2462006 0.2397279 0.2221058 0.2055021 0.2016031
+# [22] 0.1943176 0.1800318 0.1765623 0.1728871 0.1668199 0.1597925 0.1592135
+# [29] 0.1568824 0.1559646 0.1532039 0.1480882 0.1441964 0.1431147 0.1421256
+# [36] 0.1395183 0.1371298 0.1355640 0.1341604 0.1325619 0.1310997 0.1296666
+# [43] 0.1279276 0.1267022 0.1263697 0.1250603 0.1238811 0.1225764 0.1221410
+# [50] 0.1215911
+chosen_elbow <- findElbowPoint(percent.var)
+chosen_elbow #5
+
+#diagnostic plots looking at how well PCA resolved teh variance in the sample and what it could be resolving
+pdf("plotReducedDim_firt2PCAs_by_day_H_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "day_H")
+dev.off()
+
+pdf("plotReducedDim_firt2PCAs_by_counts_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "sum_after_norm")
+dev.off()
+
+ngenes_after_norm <- colSums(assay(sce, "logcounts")>0)
+colData(sce)$ngenes_after_norm <- ngenes_after_norm 
+pdf("plotReducedDim_firt2PCAs_by_ngenes_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "ngenes_after_norm")
+dev.off()
+
+pdf("plotReducedDim_firt3PCAs_comparison_by_counts.pdf")
+plotReducedDim(sce, dimred = "PCA", ncomponents = 3, colour_by = "sum_after_norm")
+dev.off()
+
+pdf("plotReducedDim_PCA_by_Sample.pdf")
+ggcells(sce, aes(x = PCA.1, y = PCA.2, colour = SampleName)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ SampleName) +
+  labs(x = "PC1", y = "PC2", colour = "Sample")
+dev.off()
+
+#plotting different days on PCA plot 
+sce$day_H <- as.factor(sce$day_H)
+unique_days <- levels(sce$day_H)
+num_colors <- length(unique_days)
+colors <- brewer.pal(min(num_colors, 8), "Set1")
+if (num_colors > 8) {
+  colors <- colorRampPalette(brewer.pal(8, "Set1"))(num_colors)
+}
+day_colors <- setNames(colors, unique_days)
+
+pdf("PCA_resolving_different_days.pdf")
+ggcells(sce, aes(x = PCA.1, y = PCA.2, colour = day_H)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ day_H) +
+  labs(x = "PC1", y = "PC2", colour = "Day") +
+  scale_color_manual(values = day_colors) +
+  theme_minimal()
+dev.off()
+
+#plottign UMAP
+set.seed(123)
+sce <- runUMAP(sce, dimred="PCA", n_dimred = 20, name="UMAP_pca20")
+UMAP_pca20 <- reducedDim(sce, "UMAP_pca20")
+
+lib.size <- colSums(assay(sce, "logcounts"))
+ngenes <- colSums(assay(sce, "logcounts")>0)
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = UMAP_pca20[,1],
+      UMAP2 = UMAP_pca20[,2],
+      lib.size,
+      ngenes
+      )
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(lib.size))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(total counts)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_by_logTotalCounts.pdf') 
+
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(ngenes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(Features Detected)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_by_logFeaturesDetected.pdf') 
+
+
+
+
+
+
+
+
+#decontaminated counts
+gene_var <- modelGeneVar(sce, assay.type="decontXlogcounts")
+gene_var
+> #                                mean       total        tech          bio
+#                           <numeric>   <numeric>   <numeric>    <numeric>
+# TSPAN6                  0.041382068  0.05420509  0.06184939 -0.007644300
+# TNMD                    0.000884772  0.00214356  0.00132237  0.000821184
+# DPM1                    0.162634173  0.23522609  0.24011433 -0.004888234
+# SCYL3                   0.075326260  0.10941040  0.11258213 -0.003171734
+# C1orf112                0.117003225  0.16915445  0.17429301 -0.005138565
+# ...                             ...         ...         ...          ...
+# ENSG00000291298         0.000155182 0.000208746 0.000231934 -2.31886e-05
+# ENSG00000291299         0.022975719 0.032236684 0.034339370 -2.10269e-03
+# PRSS30P_ENSG00000291300 0.000000000 0.000000000 0.000000000  0.00000e+00
+# ENSG00000291301         0.000000000 0.000000000 0.000000000  0.00000e+00
+# EmGFP                   0.013195044 0.030919297 0.019721232  1.11981e-02
+
+hvgs <- getTopHVGs(gene_var, prop=0.1)
+length(hvgs)
+#1553
+
+PCA_decontXlogcounts <- scater::calculatePCA(sce, 
+                        ncomponents = 50,
+                        subset_row = hvgs,
+                        exprs_values = "decontXlogcounts"
+                       )
+
+reducedDim(sce, "PCA_decontXlogcounts") <- PCA_decontXlogcounts
+
+pdf("plotReducedDim_firt2PCAs_decontXlogcounts_by_day_H.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "day_H")
+dev.off()
+
+percent.var <- attr(reducedDim(sce, "PCA_decontXlogcounts"), "percentVar")
+pdf("variance_explaiend_PCA_decontXlogcounts.pdf")
+plot(percent.var, log = "y", xlab = "PC_decontXlogcounts", ylab = "Variance explained (%)")
+dev.off()
+
+percent.var
+> percent.var
+#  [1] 9.8320675 5.6060533 3.1079531 2.3147748 1.2259594 1.0738745 0.8582190
+#  [8] 0.6376052 0.5771294 0.5172199 0.4155079 0.3960003 0.3218333 0.2881249
+# [15] 0.2840780 0.2589339 0.2509186 0.2477002 0.2307255 0.2187830 0.2130547
+# [22] 0.2034385 0.1888593 0.1835951 0.1803931 0.1723864 0.1691099 0.1671971
+# [29] 0.1636053 0.1613970 0.1568455 0.1540785 0.1527480 0.1497644 0.1479731
+# [36] 0.1452475 0.1442244 0.1420067 0.1398164 0.1384957 0.1372275 0.1357327
+# [43] 0.1345121 0.1335077 0.1328396 0.1306511 0.1302691 0.1297597 0.1291157
+# [50] 0.1278795
+
+chosen_elbow <- findElbowPoint(percent.var)
+chosen_elbow
+#7
+
+
+pdf("PCA_decontXlogcounts_resolving_different_days.pdf")
+ggcells(sce, aes(x = PCA_decontXlogcounts.1, y = PCA_decontXlogcounts.2, colour = day_H)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ day_H) +
+  labs(x = "PC1", y = "PC2", colour = "Day")
+dev.off()
+
+pdf("plotReducedDim_firt2PCAs_by_counts_PCA_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "sum_decontXlogcounts")
+dev.off()
+
+colData(sce)$ngens_decontXlogcounts <- colSums(assay(sce, "decontXlogcounts")>0)
+pdf("plotReducedDim_firt2PCAs_by_ngenes_PCA_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "ngens_decontXlogcounts")
+dev.off()
+
+pdf("plotReducedDim_firt3PCAs_comparison_by_counts_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", ncomponents = 3, colour_by = "sum_decontXlogcounts")
+dev.off()
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca20", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = 20,
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca7", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = 7,
+               n_neighbors = 25,
+               min_dist = 0.5
+               )               
+
+UMAP_pca20 <- reducedDim(sce, "UMAP_decontXlogcounts_pca20")
+UMAP_pca7 <- reducedDim(sce, "UMAP_decontXlogcounts_pca7")
+
+lib.sizes_decont <- colSums(assay(sce, "decontXlogcounts"))
+ngenes_decont <- colSums(assay(sce, "decontXlogcounts")>0)
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = UMAP_pca7[,1],
+      UMAP2 = UMAP_pca7[,2],
+      UMAP3 = UMAP_pca20[,1],
+      UMAP4 = UMAP_pca20[,2],
+      lib.sizes_decont,
+      ngenes_decont
+      )
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top7pca_decontXlogcounts_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP3, y = UMAP4, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_decontXlogcounts_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(ngenes_decont))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(features detected)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_decontXlogcounts_by_logFeaturesDetected.pdf') 
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(lib.sizes_decont))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(total counts)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top7pca_decontXlogcounts_by_logTotalCounts.pdf') 
+
+
+#save data sce with both PCA and UMAP for logcoutns and decontXlogcounts
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/correction2/sce_DimRed_correction.rds")
+
+
+############################################################################################################################################################################################################################################################
+#Clustering
+library(scater)
+library(scran)
+library(bluster)
+library(cluster)
+library(igraph)
+library(pheatmap)
+library(patchwork)
+library(tidyverse)
+library(leiden)
+
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/corrections/sce_DimRed_correction.rds")
+#clustering before decontX
+pca <- reducedDim(sce, "PCA")
+graph <- buildSNNGraph(pca, d = NA, transposed = TRUE)
+
+set.seed(42)
+clusters <- leiden(graph, resolution_parameter = 1.5)
+names(clusters) <-  colData(sce)$bc_wells
+colData(sce)$leidenclusters_before_decontX <- clusters
+
+#clustering after decontX
+pca <- reducedDim(sce, "PCA_decontXlogcounts")
+graph <- buildSNNGraph(pca, d = NA, transposed = TRUE)
+
+set.seed(42)
+clusters <- leiden(graph, resolution_parameter = 1)
+names(clusters) <-  colData(sce)$bc_wells
+colData(sce)$leidenclusters_after_decontX <- clusters
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/correction2/sce_clusters_correction.rds")

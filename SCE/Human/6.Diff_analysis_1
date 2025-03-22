@@ -1,0 +1,96 @@
+library(SingleCellExperiment)
+library(scran)
+library(scater)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/DimRed+clust/sce_decontX_DimRed_clust.rds")
+
+sce$leidenclusters_after_decontX <- factor(sce$leidenclusters_after_decontX)
+
+cluster_id <- "15"  
+
+de_genes <- findMarkers(sce, groups = sce$leidenclusters_after_decontX, subset.row = which(sce$leidenclusters_after_decontX == cluster_id))
+head(de_genes[[cluster_id]])
+
+#cluster 2
+#               Top      p.value          FDR summary.logFC   logFC.1   logFC.3
+#         <integer>    <numeric>    <numeric>     <numeric> <numeric> <numeric>
+# DDX17           1 9.29291e-143 6.38526e-141     -0.795919 -0.258732 -0.681441
+# SHROOM3         1  0.00000e+00  0.00000e+00     -1.725790  1.116065 -1.725790
+# NRG1            1 9.33179e-210 1.25452e-207      1.526241 -0.234227  1.526241
+# LRP1B           1 3.21792e-218 4.73800e-216     -2.554572  0.699505  0.923170
+# NEGR1           1 2.12275e-310 9.37649e-308      1.584045  1.584045  1.099483
+# CADM2           1 4.19417e-312 2.16140e-309     -2.754020  0.865062  0.792307
+
+
+#4
+#               Top      p.value          FDR summary.logFC   logFC.1    logFC.2
+#         <integer>    <numeric>    <numeric>     <numeric> <numeric>  <numeric>
+# GLI3            1  0.00000e+00  0.00000e+00      2.881227  2.881227  0.9399695
+# EPHB1           1 5.65891e-260 6.23424e-258     -1.123793 -0.926666 -0.4938917
+# AFF2            1  8.13596e-46  6.42133e-45      0.608540 -0.137287  0.0984024
+# UNC5D           1 5.70683e-169 4.71527e-167     -1.623158 -0.553943 -0.9493735
+# GALNT14         1  2.39310e-40  1.61412e-39     -0.965992  0.343291  0.2776542
+# CTNND2          1  0.00000e+00  0.00000e+00     -2.150548 -0.291987 -0.9552741
+
+
+#5
+#               Top      p.value          FDR summary.logFC   logFC.1    logFC.2
+#         <integer>    <numeric>    <numeric>     <numeric> <numeric>  <numeric>
+# ST3GAL1         1  0.00000e+00  0.00000e+00     1.3447207 0.0465785  0.3731954
+# CDON            1 4.87404e-298 4.14098e-296     1.1163019 1.1163019  0.8444769
+# SOX6            1  0.00000e+00  0.00000e+00     1.6198207 1.6198207  0.6891327
+# PLXDC2          1  0.00000e+00  0.00000e+00     1.4804975 0.7561798 -0.0623622
+# KBTBD4          1  4.94442e-37  1.77398e-36     0.0496159 0.0142607  0.0304166
+# EXOSC9          1 7.10130e-123 1.43649e-121     0.1707163 0.0880265  0.1071754
+
+
+#7
+#                Top      p.value          FDR summary.logFC     logFC.1
+#          <integer>    <numeric>    <numeric>     <numeric>   <numeric>
+# PDE1A            1  0.00000e+00  0.00000e+00      2.052449 -0.97027692
+# EXOC6B           1  1.21053e-53  2.75924e-52     -0.686947 -0.55906843
+# AFF3             1  0.00000e+00  0.00000e+00      2.005704 -0.79839652
+# GALNT13          1 1.83022e-270 6.57049e-268     -1.847758  0.00477227
+# CACNA2D1         1 2.55472e-268 7.33715e-266     -2.139166 -0.75316580
+# CDH12            1 3.05497e-117 2.08902e-115      1.017594  1.01759391
+
+#11
+#               Top      p.value          FDR summary.logFC   logFC.1    logFC.2
+#         <integer>    <numeric>    <numeric>     <numeric> <numeric>  <numeric>
+# CACNA1C         1  1.56493e-67  1.30411e-65     -1.337106 -0.751986 -0.3330169
+# NFIA            1 3.04748e-220 1.52374e-217      2.556134 -0.214050 -0.0306232
+# BRINP3          1  6.33158e-27  1.43900e-25     -0.992732  0.317167  0.1620812
+# KCNT2           1  1.52832e-18  1.81943e-17     -0.659528 -0.301501  0.1619234
+# VSNL1           1 7.97887e-170 1.99472e-167     -0.960367 -0.059284 -0.2631794
+# PDLIM5          1 4.34758e-108 7.24597e-106     -1.484457  0.177004  0.0779433
+
+#12
+#                Top     p.value         FDR summary.logFC    logFC.1     logFC.2
+#          <integer>   <numeric>   <numeric>     <numeric>  <numeric>   <numeric>
+# CORO2B           1 3.17261e-46 1.38185e-44     -1.029669 -1.0296693  0.14624293
+# CEMIP            1 1.40233e-59 9.16191e-58     -0.852303 -0.8523032 -0.15685862
+# SFRP1            1 1.45267e-46 7.11809e-45      0.994304  0.9148553  0.56602082
+# ILF3             1 7.74456e-25 1.68659e-23      0.716043  0.3386148  0.71604297
+# KCNMA1           1 2.54774e-37 8.32262e-36     -0.758161  0.2338324 -0.00619042
+# ANKRD33B         1 2.30757e-50 1.29224e-48     -0.488420 -0.0283642 -0.08069005
+
+
+#14
+#               Top      p.value          FDR summary.logFC      logFC.1
+#         <integer>    <numeric>    <numeric>     <numeric>    <numeric>
+# CCNY            1  1.93314e-19  3.60047e-18      0.744070  0.374247971
+# LGI1            1  6.03505e-86  4.49611e-84     -0.918199  0.000731355
+# FHOD3           1 6.58708e-118 9.81475e-116      1.864882  1.427053788
+# CNTNAP5         1  8.75131e-23  2.60789e-21     -0.579131 -0.019462157
+# DSCAM           1 2.08417e-105 2.07028e-103     -2.205286 -0.290909656
+# CNTNAP2         1 6.37071e-152 1.89847e-149      2.399232 -0.465057393
+
+#15
+#              Top      p.value          FDR summary.logFC   logFC.1   logFC.2
+#        <integer>    <numeric>    <numeric>     <numeric> <numeric> <numeric>
+# RAB3B          1  3.40348e-37  6.48931e-36      0.914193  0.885980  0.806758
+# NLGN1          1 2.12345e-158 6.07306e-156      1.511417  0.979799  0.483792
+# TANC2          1  2.58008e-49  8.19891e-48     -1.004432 -0.227114  0.154558
+# PDGFD          1  1.55402e-33  2.11643e-32      0.815117  0.815117  0.302984
+# HS6ST2         1  1.30387e-89  9.32269e-88      1.726697  1.581219  0.861298
+# SLIT1          1  2.54418e-46  7.27635e-45      1.071897 -0.304495  0.354114

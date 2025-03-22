@@ -1,0 +1,91 @@
+library(scater)
+library(scran)
+library(bluster)
+library(cluster)
+library(igraph)
+library(pheatmap)
+library(patchwork)
+library(tidyverse)
+library(leiden)
+
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/DimRed/sce_DimRed_after_decontX.rds")
+
+#clustering before decontX
+pca <- reducedDim(sce, "PCA")
+graph <- buildSNNGraph(pca, d = NA, transposed = TRUE)
+
+set.seed(42)
+clusters <- leiden(graph, resolution_parameter = 1.5)
+names(clusters) <-  colData(sce)$bc_wells
+colData(sce)$leidenclusters_before_decontX <- clusters
+
+umap_pca6 <- reducedDim(sce, "UMAP_pca6")
+umap_pca20 <- reducedDim(sce, "UMAP_pca20")
+df_plot <- data.frame(
+      colData(sce), 
+      UMAP1 = umap_pca6[,1],
+      UMAP2 = umap_pca6[,2],
+      UMAP3 = umap_pca20[,1],
+      UMAP4 = umap_pca20[,2] 
+      )
+
+ggplot(df_plot, aes(x = UMAP1, y = UMAP2, color = factor(leidenclusters_before_decontX)))+ geom_point(size = 0.4) +
+       labs(x = "Dim 1", y = "Dim 2", color = "cluster") + 
+       theme_minimal() +
+       theme(legend.position = "right") +  
+       guides(colour = guide_legend(override.aes = list(size = 5))) + 
+       coord_fixed(ratio = 1)
+ggsave("umap_top6pca_leidenclusters_before_decontX_sce_decontXDimRed.pdf")
+
+ggplot(df_plot, aes(x = UMAP3, y = UMAP4, color = factor(leidenclusters_before_decontX)))+ geom_point(size = 0.4) +
+       labs(x = "Dim 1", y = "Dim 2", color = "cluster") + 
+       theme_minimal() +
+       theme(legend.position = "right") +  
+       guides(colour = guide_legend(override.aes = list(size = 5))) + 
+       coord_fixed(ratio = 1)
+ggsave("umap_top20pca_leidenclusters_before_decontX_sce_decontXDimRed.pdf")
+
+
+#clustering after decontX
+pca <- reducedDim(sce, "PCA_decontXlogcounts")
+
+graph <- buildSNNGraph(pca, d = NA, transposed = TRUE)
+
+set.seed(42)
+clusters <- leiden(graph, resolution_parameter = 1)
+names(clusters) <-  colData(sce)$bc_wells
+colData(sce)$leidenclusters_after_decontX <- clusters
+
+umap_7pca <- reducedDim(sce, "UMAP_decontXlogcounts_pca7")
+umap_20pca <- reducedDim(sce, "UMAP_decontXlogcounts_pca20")
+df_plot <- data.frame(
+      colData(sce), 
+      UMAP1 = umap_6pca[,1],
+      UMAP2 = umap_6pca[,2],
+      UMAP3 = umap_20pca[,1],
+      UMAP4 = umap_20pca[,2] 
+      )
+
+ggplot(df_plot, aes(x = UMAP1, y = UMAP2, color = factor(leidenclusters_after_decontX)))+ geom_point(size = 0.4) +
+       labs(x = "Dim 1", y = "Dim 2", color = "cluster") + 
+       theme_minimal() +
+       theme(legend.position = "right") +  
+       guides(colour = guide_legend(override.aes = list(size = 5))) + 
+       coord_fixed(ratio = 1)
+ggsave("umap_top6pca_leidenclusters_after_decontX_sce_decontXDimRed2.pdf")
+
+ggplot(df_plot, aes(x = UMAP3, y = UMAP4, color = factor(leidenclusters_after_decontX)))+ geom_point(size = 0.4) +
+       labs(x = "Dim 1", y = "Dim 2", color = "cluster") + 
+       theme_minimal() +
+       theme(legend.position = "right") +  
+       guides(colour = guide_legend(override.aes = list(size = 5))) + 
+       coord_fixed(ratio = 1)
+ggsave("umap_top20pca_leidenclusters_after_decontX_sce_decontXDimRed2.pdf")
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/DimRed/sce_clusters_after_decontX.rds")

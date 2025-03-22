@@ -1,0 +1,212 @@
+cd /data2/hanna/axonoutgrowth
+singularity shell --bind /data2:/mnt singlecell.sif
+cd /mnt/hanna/axonoutgrowth/human2/seurat
+R
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(Matrix)
+library(ggplot2)
+library(harmony)
+library(future)
+
+#reading in the data
+path2data <- "/mnt/hanna/axonoutgrowth/data/human/"
+counts <- readMM(paste0(path2data, "counts.mtx"))
+metadata <- read.csv(paste0(path2data, "metadata.csv"))
+barcodes <- read.csv(paste0(path2data, "barcodes.csv"))
+gene_info <- read.csv(paste0(path2data, "gene_info.csv"))
+
+counts <- as(counts, "CsparseMatrix")
+rownames(counts) <- gene_info$unique_name
+colnames(counts) <- barcodes$barcodes 
+
+#make mouse surat object (mso)
+hso <- CreateSeuratObject(counts = counts,
+                            assay = "RNA",
+                            meta.data = metadata,
+                            project = "AxonOutgrowth_Human"
+                          )
+
+saveRDS(hso, "HumanSeuratObject_raw.rds")
+
+# An object of class Seurat 
+# 62704 features across 1816463 samples within 1 assay 
+# Active assay: RNA (62704 features, 0 variable features)
+# 1 layer present: counts
+
+hso <- readRDS("/mnt/hanna/axonoutgrowth/human2/seurat/HumanSeuratObject_raw.rds")
+hso[["percent.mt"]] <- PercentageFeatureSet(hso, pattern = "^MT-")
+head(hso@meta.data, 5)
+
+#ploting QC plots 
+nFeature_bySampleName <- VlnPlot(hso, features = "nFeature_RNA", pt.size = 0, group.by = "sample_name_H", flip = TRUE, log = TRUE) 
+nFeature_bySampleName <- nFeature_bySampleName + theme(
+  axis.text.x = element_text(size = 8),
+  axis.title.x = element_text(size = 12), 
+  plot.title = element_text(size = 14),
+  aspect.ratio = 1/3,
+  legend.position = "none" 
+) + labs(
+  x = "Sample Name",  
+  y = "log[nFeature]"    
+)
+ggsave("nFeature_bySampleName_violin.png", plot = nFeature_bySampleName, width = 10, height = 8, dpi = 300)
+
+nCount_bySampleName <- VlnPlot(hso, features = "nCount_RNA", pt.size = 0, group.by = "sample_name_H", flip = TRUE, log = TRUE) 
+nCount_bySampleName <- nCount_bySampleName + theme(
+  axis.text.x = element_text(size = 8),
+  axis.title.x = element_text(size = 12), 
+  plot.title = element_text(size = 14),
+  legend.position = "none"
+) + labs(
+  x = "Sample Name",  
+  y = "log[nCount]"    
+)
+ggsave("nCount_bySampleName_violin.png", plot = nCount_bySampleName, width = 10, height = 8, dpi = 300)
+
+PerMT_bySampleName <- VlnPlot(hso, features = "percent.mt", pt.size = 0, group.by = "sample_name_H", flip = TRUE, log = FALSE) 
+PerMT_bySampleName <- PerMT_bySampleName + theme(
+  axis.text.x = element_text(size = 8),
+  axis.title.x = element_text(size = 12), 
+  plot.title = element_text(size = 14),
+  legend.position = "none"
+) + labs(
+  x = "Sample Name",  
+  y = "PerMT"    
+) + scale_y_continuous(limits = c(0,15))
+ggsave("PerMT_yp15_bySampleName_violin.png", plot = PerMT_bySampleName, width = 10, height = 8, dpi = 300)
+
+plot1 <- FeatureScatter(hso, feature1 = "nCount_RNA", feature2 = "percent.mt", log = FALSE, jitter = TRUE, group.by = "sample_name_H")
+ggsave("nCounts_vs_PerMT.png", plot = plot1, width = 10, height = 8, dpi = 300)
+plot2 <- FeatureScatter(hso, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "sample_name_H")
+ggsave("nCounts_vs_nFeature.png", plot = plot2, width = 10, height = 8, dpi = 300)
+
+saveRDS(hso, "HumanSeuratObject_befroeSubset.rds")
+
+hso@meta.data$complexity =  hso@meta.data$nFeature_RNA/hso@meta.data$nCount_RNA
+hso <- subset(hso, subset = nFeature_RNA > 200 & nCount_RNA > 200 & percent.mt < 20 & complexity < 0.9)
+
+# An object of class Seurat 
+# 62704 features across 135230 samples within 1 assay 
+# Active assay: RNA (62704 features, 0 variable features)
+#  1 layer present: counts
+
+saveRDS(hso, "HumanSeuratObject_Subset.rds")
+
+hso <- subset(hso, subset = nFeature_RNA > 400 & nCount_RNA > 400 & percent.mt < 20 & complexity < 0.9)
+
+
+plot1 <- FeatureScatter(hso, feature1 = "nCount_RNA", feature2 = "percent.mt", log = FALSE, jitter = TRUE, group.by = "sample_name_H")
+ggsave("nCounts_vs_PerMT_subset2.png", plot = plot1, width = 10, height = 8, dpi = 300)
+plot2 <- FeatureScatter(hso, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "sample_name_H")
+ggsave("nCounts_vs_nFeature_subset2.png", plot = plot2, width = 10, height = 8, dpi = 300)
+
+#normalisation 
+hso <- NormalizeData(hso, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#identifying highly variable features 
+hso <- FindVariableFeatures(hso, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(hso), 10)
+
+top10 
+# 1] "RELN"            "CDC20B"          "COL3A1"          "PMCH"           
+#  [5] "ENSG00000243620" "COL1A1"          "DLX6-AS1"        "NXPH1"          
+#  [9] "COL1A2"          "COL6A3"         
+
+plot1 <- VariableFeaturePlot(hso)
+ggsave("Unlabled_VariableFeatures.png", plot = plot1, width = 10, height = 8, dpi = 300)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+ggsave("Labled_VariableFeatures.png", plot = plot2, width = 10, height = 8, dpi = 300)
+
+#scaling 
+all.genes <- rownames(hso)
+hso <- ScaleData(hso, features = all.genes)
+
+saveRDS(hso, "HumanSeuratObject_Norm_Scaled_Subset2.rds")
+hso <- readRDS("HumanSeuratObject_Norm_Scaled_Subset2.rds")
+#performing lienar dimentionality reduction: PCA
+
+plan("multicore", workers = 4)
+hso <- RunPCA(hso, features = VariableFeatures(object = hso))
+print(hso[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(mso, dims = 1:5, reduction = "pca", ncol = 5)
+pca_SampleName <- DimPlot(mso, reduction = "pca", pt.size = 0.5,group.by = "sample_name_M")
+ggsave("PCA_bySampleName.png", plot = pca_SampleName, width = 10, height = 8, dpi = 300)
+
+pca_batch <- DimPlot(mso, reduction = "pca", pt.size = 0.5,group.by = "batch_M")
+ggsave("PCA_bybatch.png", plot = pca_batch, width = 10, height = 8, dpi = 300)
+
+DimHeatmap(mso, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmapPCA15 <- DimHeatmap(mso, dims = 1:15, cells = 500, balanced = TRUE)
+ggsave("DimHeatMap_first_15PCAs.png", plot = DimHeatmapPCA15,  width = 8, height = 12, dpi = 300)
+
+elbow <- ElbowPlot(mso)
+ggsave("elbow_plot.png", plot = elbow,  width = 10, height = 8, dpi = 300)
+
+
+
+#cell cycle scoring 
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+mso <- CellCycleScoring(mso, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+
+
+#refiltering
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/DimRed/sce_clusters_after_decontX.rds")
+
+#fidning the filter tresholds
+UMAP_pca20 <- reducedDim(sce, "UMAP_decontXlogcounts_pca20")
+UMAP_pca6 <- reducedDim(sce, "UMAP_decontXlogcounts_pca6")
+
+lib.sizes_decont <- colSums(assay(sce, "decontXlogcounts"))
+ngenes_decont <- colSums(assay(sce, "decontXlogcounts")>0)
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = UMAP_pca20[,1],
+      UMAP2 = UMAP_pca20[,2],
+      UMAP3 = UMAP_pca6[,1],
+      UMAP4 = UMAP_pca6[,2],
+      lib.sizes_decont,
+      ngenes_decont
+      )
+
+plot.index <- order(df_umap$lib.sizes)
+ggplot(df_umap[plot.index,], aes(x = UMAP1, y = UMAP2, color = log(lib.sizes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(counts)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        scale_color_gradient(low = "blue", high = "red") +
+        coord_fixed(ratio = 1)
+
+#ploting a range of values
+
+    min_lib_size <- 10000
+    max_lib_size <- 1778861
+    df_umap$color <- ifelse(df_umap$lib.sizes >= min_lib_size & df_umap$lib.sizes <= max_lib_size,
+                            df_umap$lib.sizes, NA)
+
+    # Plot using the new color column
+    plot.index <- order(df_umap$lib.sizes_decont)
+    ggplot(df_umap[plot.index,], aes(x = UMAP1, y = UMAP2)) +
+    geom_point(aes(color = color), size = 0.4) +
+    scale_color_gradient(low = "blue", high = "red", na.value = "grey") +
+    labs(x = "Dim 1", y = "Dim 2", color = "counts") + 
+    theme_minimal() +
+    theme(legend.position = "right") +  
+    guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+    coord_fixed(ratio = 1)

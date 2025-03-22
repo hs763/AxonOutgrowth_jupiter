@@ -1,0 +1,283 @@
+library(BiocParallel)
+library(scran)
+library(irlba)
+library(Rtsne)
+library(Matrix)
+library(httpgd)
+library(ggplot2)
+library(biomaRt)
+library(viridisLite)
+library(viridis)
+library(scDblFinder)
+library(umap)
+library(celda)
+library(igraph)
+library(leiden)
+
+library(DropletUtils)
+library(scater)
+library(ensembldb)
+library(AnnotationHub)
+library(BiocParallel)
+library(tidyverse)
+library(patchwork)
+library(ggvenn)
+
+
+path2data <- "/mnt/hanna/axonoutgrowth/data/human/"
+counts <- readMM(paste0(path2data, "counts.mtx"))
+metadata <- read.csv(paste0(path2data, "metadata.csv"))
+colnames <- read.csv(paste0(path2data, "colnames.csv"))
+rownames <- read.csv(paste0(path2data, "rownames.csv"))
+
+Barcodes <- colnames$x 
+Gene_ids <- rownames$x
+
+sce <- SingleCellExperiment(list(counts=counts),
+      colData=DataFrame(metadata))
+rownames(sce) <- rownames$x
+colnames(sce) <- colnames$x 
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/sce_raw.rds")
+
+colnames(colData(sce))[15]<- "SampleName"
+rowData(sce) <- Gene_ids
+genes     <- read.csv("/mnt/hanna/synaptogenesis/newvolume/analysis/combined_h/all-well/DGE_unfiltered/all_genes.csv")
+colnames(genes)[1] <- "ID"
+names(rowData(sce))[1] <- "ID"
+mapped_genes <- merge(as.data.frame(rowData(sce)), genes, by = "ID", all.x = TRUE)
+rowData(sce) <- mapped_genes
+
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "ensembl",  dataset = "hsapiens_gene_ensembl")
+gene_map  <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "chromosome_name"),
+  filters = "ensembl_gene_id", values = rowData(sce)$ID, mart = ensembl)
+names(gene_map)[1] <- "ID"
+mapped_genes <- merge(as.data.frame(rowData(sce)), gene_map, by = "ID", all.x = TRUE)
+mapped_genes_unique <- mapped_genes[!duplicated(mapped_genes$ID),]
+rowData(sce) <- mapped_genes_unique 
+
+#diagnostics plots 
+#cell complexity plot 
+df <- data.frame(colData(sce))
+ggplot(df, aes(x = tscp_count, y = gene_count, col = ifelse(gene_count > 400 & tscp_count > 500, "keep", "drop"))) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_minimal() +
+  theme(text = element_text(size = 20), legend.position = "none") +
+  labs(x = "UMI count", y = "Number of expressed genes") +
+  scale_color_manual(values = c("drop" = "red", "keep" = "blue"), name = "")
+ggsave("cell_complexity_ngenes400_libsize500.pdf")
+
+#removing undetected genes
+detected_genes <- rowSums(counts(sce)) > 0
+table(detected_genes)
+#FALSE  TRUE 
+#15177 47527 
+sce <- sce[detected_genes,]
+
+new_rowData <- rowData(sce)[rowData(sce)$ID == rownames(counts(sce)),]
+rowData(sce) <- new_rowData
+
+
+#diagnostic plots about number of  reads and genes detected per sample 
+ggplot(colData(sce), aes(x = factor(SampleName), y = tscp_count, fill = factor(SampleName))) +
+  geom_violin() +
+  scale_y_log10() +
+  labs(x = "Day", y = "Total Count (log10 scale)", fill = "Sample Name", title = "Total Counts") +
+  theme_minimal() +
+  coord_fixed(ratio = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5))
+ggsave("diagnosticPlot_totoal_counts_by_SampleName_before_QC.pdf")
+
+ggplot(colData(sce), aes(x = factor(SampleName), y = gene_count, fill = factor(SampleName))) +
+  geom_violin() +
+  scale_y_log10() +
+  labs(x = "Day", y = "Feature Number (log10 scale)", fill = "Sample Name", title = "Features Detected") +
+  theme_minimal() +
+  coord_fixed(ratio = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5))
+ggsave("diagnosticPlot_detected_fetures_by_SampleName_before_QC.pdf")
+
+plot_df <- data.frame(colData(sce))
+ggplot(plot_df, aes(x = factor(SampleName), y = as.numeric(tscp_count))) +
+  geom_boxplot() +
+  theme_bw() +  coord_flip() +
+  labs(x = "Sample", y = "Number of UMIs") +
+  scale_y_log10(breaks = c(100, 1000, 5000, 10000, 50000, 100000),
+    labels = c("100","1,000", "5,000", "10,000", "50,000", "100,000"))
+ggsave("box-whisker_plot_lib.sizes_preQC.pdf")
+!!!!!!!!!probelm with this above 
+
+#mitochondrial fraction 
+is_mito <- grepl("^MT-", rowData(sce)$gene_name)
+sum(is_mito) #31
+mt.counts   <- counts(sce)[is_mito, ]
+mt.fraction <- colSums(mt.counts)/colData(sce)$tscp_count
+colData(sce)$mt.fraction <- mt.fraction
+
+ggplot(colData(sce), aes(x = factor(SampleName), y = mt.fraction, fill = factor(SampleName))) +
+  geom_violin() +
+  labs(x = "Day", y = "Mt.fraction", fill = "Sample", title = "mt.fraction") +
+  theme_minimal() +
+  coord_fixed(ratio = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5))
+ggsave("diagnosticPlot_mt_fraction_by_SampleName_before_QC.pdf")
+
+ggplot(plot_df, aes (x = factor(SampleName), y = as.numeric(mt.fraction))) +
+  geom_boxplot() +
+  theme_bw() +  coord_flip() +
+  labs(x = "Sample", y = "mitochdonrial Fraction") 
+ggsave("box-whisker_plot_mt_fraction_by_SampleName_before_QC.pdf")
+
+#mt fraction filter
+is_mito <- grepl("^MT-", rowData(sce)$gene_name)
+mt.counts   <- counts(sce)[is_mito, ]
+mt.fraction <- colSums(mt.counts)/colSums(counts(sce))
+colData(sce)$mt.fraction <- mt.fraction
+
+summary(mt.fraction)
+ Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+0.000000 0.000000 0.005376 0.016855 0.024590 0.833333
+
+mt.p   <- pnorm(mt.fraction, mean = median(mt.fraction), sd = mad(mt.fraction), lower.tail = FALSE)
+mt.lim <- min(mt.fraction[which(p.adjust(mt.p, method = "fdr") < 0.01)])
+print(paste("MT filtering limit set to using statistical test:", mt.lim))
+[1] "MT filtering limit set to using statistical test: 0.0281173594132029"
+
+mt.lim <- min(mt.fraction[which(p.adjust(mt.p, method = "fdr") < 0.001)])
+print(paste("MT filtering limit set to using statistical test:", mt.lim))
+[1] "MT filtering limit set to using statistical test: 0.0338983050847458"
+
+df <- data.frame(colData(sce))
+ggplot(df, aes(x=tscp_count, y=mt.fraction, col = ifelse(mt.fraction > mt.lim, "drop", "keep"))) + 
+  geom_point() +
+  scale_x_log10() +
+  theme_minimal() +
+  theme(text = element_text(size = 20), legend.position = "none") +
+  labs(x = "UMI count", y = "Mitochondrial Fraction") +
+  scale_color_manual(values = c("drop" = "blue", "keep" = "orange"), name = "")
+ggsave("mt.fraction_treshold.pdf")
+
+#ribosomoal DNA fraction 
+is_ribosomal <- grepl("^RPS|^RPL", rowData(sce)$gene_name)
+rb.counts <- counts(sce)[is_ribosomal, ]
+rb.fraction <- colSums(rb.counts) / colSums(counts(sce))
+colData(sce)$rb.fraction <- rb.fraction
+
+rb.p   <- pnorm(rb.fraction, mean = median(rb.fraction), sd = mad(rb.fraction), lower.tail = FALSE)
+rb.lim <- min(rb.fraction[which(p.adjust(rb.p, method = "fdr") < 0.001)])
+print(paste("RB filtering limit set to using statistical test:", rb.lim)) 
+0
+
+summary(rb.fraction)
+    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+0.000000 0.000000 0.000000 0.004301 0.000000 0.363636 
+
+rb.lim <- 0.1
+#https://www.biostars.org/p/415008/#415138
+
+df <- data.frame(colData(sce))
+ggplot(df, aes(x=tscp_count, y=rb.fraction, col = ifelse(rb.fraction > rb.lim, "drop", "keep"))) + 
+  geom_point() +
+  scale_x_log10() +
+  theme_minimal() +
+  theme(text = element_text(size = 20), legend.position = "none") +
+  labs(x = "UMI count", y = "Mitochondrial Fraction") +
+  scale_color_manual(values = c("drop" = "blue", "keep" = "orange"), name = "")
+ggsave("rb.fraction_treshold.pdf")
+
+mt.lim #0.03389831
+rb.lim #0.1
+ngene.lim #500
+lib.size.lim #1000
+
+colData(sce)$complexity <- colData(sce)$gene_count/colData(sce)$lib.sizes
+summary(colData(sce)$complexity) 
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#0.01202 0.91870 0.95652 0.94593 1.00000 1.00000
+
+pdf("lib.complexity_before_filters.pdf")
+hist(ngenes/lib.sizes)
+dev.off()
+
+#applying the filters
+saveRDS(sce, "sce_before_filters_treshold.rds")
+
+sce.filtered <- sce[, sce$mt.fraction < mt.lim & sce$rb.fraction < rb.lim & sce$gene_count > 500 & sce$tscp_count > 1000]
+dim(sce.filtered)
+[1] 47527 25015
+
+bp <- MulticoreParam(25, RNGseed=1234)
+      bpstart(bp)
+sce.filtered <- scDblFinder(sce.filtered, samples="bc1_well", dbr=.05, dims=10, BPPARAM=bp)
+      bpstop(bp)
+      table(sce.filtered$scDblFinder.class)
+#singlet doublet 
+singlet doublet 
+  22816    2199
+
+#removing the cells that were identified as doubles 
+sce.filt <- sce.filtered[,colData(sce.filtered)$scDblFinder.class == "singlet"]
+dim(sce.filt) #47527 22816
+
+complexity <- colData(sce)$gene_count/colData(sce)$lib.sizes
+summary(complexity)
+   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+0.01202 0.44968 0.62488 0.57213 0.71749 0.88774 
+
+plot_df <- colData(sce.filt)
+ggplot(plot_df, aes (x = factor(SampleName), y = as.numeric(lib.sizes))) +
+  geom_boxplot() +
+  theme_bw() +  coord_flip() +
+  labs(x = "Sample", y = "Number of UMIs") +
+  scale_y_log10(breaks = c(100, 1000, 5000, 10000, 50000, 100000),
+    labels = c("100","1,000", "5,000", "10,000", "50,000", "100,000"))
+ggsave("box-whisker_plot_lib.szies_postQC.pdf")
+
+
+sce <- sce.filt
+ggplot(colData(sce), aes(x = factor(SampleName), y = tscp_count, fill = factor(SampleName))) +
+  geom_violin() +
+  scale_y_log10() +
+  labs(x = "Day", y = "Total Count (log10 scale)", fill = "Sample Name", title = "Total Counts") +
+  theme_minimal() +
+  coord_fixed(ratio = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5))
+ggsave("diagnosticPlot_totoal_counts_by_SampleName_after_QC.pdf")
+
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/QC/sce_after_QC.rds")
+
+
+#correcting for the mt. treshold
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/QC/sce_before_filters_treshold.rds")
+
+mt.lim <- 0.2
+rb.lim <- 0.1
+ngene.lim <-500
+lib.size.lim <- 1000
+
+sce.filtered <- sce[, sce$mt.fraction < mt.lim & sce$rb.fraction < rb.lim & sce$gene_count > ngene.lim & sce$tscp_count > lib.size.lim]
+dim(sce.filtered)
+
+bp <- MulticoreParam(25, RNGseed=1234)
+      bpstart(bp)
+sce.filtered <- scDblFinder(sce.filtered, samples="bc1_well", dbr=.05, dims=10, BPPARAM=bp)
+      bpstop(bp)
+      table(sce.filtered$scDblFinder.class)
+
+sce.filt <- sce.filtered[,colData(sce.filtered)$scDblFinder.class == "singlet"]
+dim(sce.filt)
+
+plot_df <- colData(sce.filt)
+ggplot(plot_df, aes (x = factor(SampleName), y = as.numeric(lib.sizes))) +
+  geom_boxplot() +
+  theme_bw() +  coord_flip() +
+  labs(x = "Sample", y = "Number of UMIs") +
+  scale_y_log10(breaks = c(100, 1000, 5000, 10000, 50000, 100000),
+    labels = c("100","1,000", "5,000", "10,000", "50,000", "100,000"))
+ggsave("box-whisker_plot_lib.szies_postQC.pdf")
+
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/QC/sce_after_QC_correction.rds")

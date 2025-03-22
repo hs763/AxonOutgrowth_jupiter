@@ -10,7 +10,7 @@ Analysis of scRNAseq experiment examining neuronal maturation in human and mouse
    *Removing cells with high mitochodnrial and ribosomal fractions.<br>
    *Removing doublets.<br>
 5. Dimentionality reduction and feature selection.
-6. Clustering and cluster annotations.
+6. Clustering and cluster annotations by label transfer and marker expression.
 7. Pseudotime alignment with MAGIC imputations.  
 
 

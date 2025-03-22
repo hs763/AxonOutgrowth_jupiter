@@ -1,0 +1,407 @@
+library(scater) 
+library(scran)
+library(PCAtools)
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+
+sce <- readRDS("/mnt/hanna/axonoutgrowth/human2/Norm/sce_Norm_after_decontX.rds")
+
+#to easier look at the genes/features selecred lets use the symbols. 
+rownames(sce) <- uniquifyFeatureNames(rownames(sce), rowData(sce)$gene_name)
+
+#perfroming DImRed for log counts before decontamination 
+#modeling gene variation in the cells 
+gene_var <- modelGeneVar(sce, assay.type="logcounts")
+gene_var 
+
+#                               mean       total       tech          bio
+#                           <numeric>   <numeric>  <numeric>    <numeric>
+# TSPAN6                  0.050870207  0.08470111 0.08542611 -0.000724999
+# TNMD                    0.000811321  0.00202296 0.00136245  0.000660510
+# DPM1                    0.187281305  0.30505241 0.30901977 -0.003967362
+# SCYL3                   0.085943741  0.14145493 0.14432485 -0.002869918
+# C1orf112                0.144132713  0.24232131 0.23990319  0.002418118
+# ...                             ...         ...        ...          ...
+# ENSG00000291298         9.99944e-05 0.000107096 0.00016792 -6.08241e-05
+# ENSG00000291299         2.68263e-02 0.043135097 0.04504930 -1.91421e-03
+# PRSS30P_ENSG00000291300 0.00000e+00 0.000000000 0.00000000  0.00000e+00
+# ENSG00000291301         0.00000e+00 0.000000000 0.00000000  0.00000e+00
+# EmGFP                   1.20365e-02 0.028738461 0.02021292  8.52554e-03
+#                             p.value         FDR
+#                           <numeric>   <numeric>
+# TSPAN6                  5.30418e-01 1.000000000
+# TNMD                    6.51204e-06 0.000295617
+# DPM1                    5.45958e-01 1.000000000
+# SCYL3                   5.70962e-01 1.000000000
+# C1orf112                4.63888e-01 1.000000000
+# ...                             ...         ...
+# ENSG00000291298         9.99438e-01  1.00000000
+# ENSG00000291299         6.48813e-01  1.00000000
+# PRSS30P_ENSG00000291300         NaN         NaN
+# ENSG00000291301                 NaN         NaN
+# EmGFP                   7.44007e-05  0.00247168
+
+#selecting highly variabel genes
+hvgs <- getTopHVGs(gene_var, prop=0.1)
+length(hvgs)
+# [1] 1841
+
+#checking if the genes are indeed variably expressed in the different samples 
+pdf("plotExpression_top20hvgs.pdf")
+plotExpression(sce, features = hvgs[1:20], point_alpha = 0.05)
+dev.off()
+
+#PCA performed on logcounts
+sce <- runPCA(sce, subset_row = hvgs)
+
+#how much variance is explained by different PCs.
+percent.var2 <- attr(reducedDim(sce, "PCA"), "percentVar")
+pdf("variance_explaiend_PCA.pdf")
+plot(percent.var, log = "y", xlab = "PC", ylab = "Variance explained (%)")
+dev.off()
+
+chosen_elbow <- findElbowPoint(percent.var)
+chosen_elbow 
+6
+
+#diagnostic plots looking at how well PCA resolved teh variance in the sample and what it could be resolving
+pdf("plotReducedDim_firt2PCAs_by_day_H_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "day_H")
+dev.off()
+
+pdf("plotReducedDim_firt2PCAs_by_counts_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "sum_a_norm")
+dev.off()
+
+ngenes_a_norm <- colSums(assay(sce, "logcounts")>0)
+colData(sce)$ngenes_a_norm <- ngenes_a_norm 
+pdf("plotReducedDim_firt2PCAs_by_ngenes_PCA_logcounts.pdf")
+plotReducedDim(sce, dimred = "PCA", colour_by = "ngenes_a_norm")
+dev.off()
+
+pdf("plotReducedDim_firt3PCAs_comparison_by_counts.pdf")
+plotReducedDim(sce, dimred = "PCA", ncomponents = 3, colour_by = "sum_a_norm")
+dev.off()
+
+pdf("plotReducedDim_PCA_by_Sample.pdf")
+ggcells(sce, aes(x = PCA.1, y = PCA.2, colour = SampleName)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ SampleName) +
+  labs(x = "PC1", y = "PC2", colour = "Sample")
+dev.off()
+
+#plotting different days on PCA plot 
+sce$day_H <- as.factor(sce$day_H)
+unique_days <- levels(sce$day_H)
+num_colors <- length(unique_days)
+colors <- brewer.pal(min(num_colors, 8), "Set1")
+if (num_colors > 8) {
+  colors <- colorRampPalette(brewer.pal(8, "Set1"))(num_colors)
+}
+day_colors <- setNames(colors, unique_days)
+
+pdf("PCA_resolving_different_days.pdf")
+ggcells(sce, aes(x = PCA.1, y = PCA.2, colour = day_H)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ day_H) +
+  labs(x = "PC1", y = "PC2", colour = "Day") +
+  scale_color_manual(values = day_colors) +
+  theme_minimal()
+dev.off()
+
+sce.denoised <- denoisePCA(sce, technical = gene_var, subset.row = hvgs)
+ncol(reducedDim(sce.denoised, "PCA"))
+#suggested PCA number is 5 
+
+#plottign UMAP
+set.seed(123)
+sce <- runUMAP(sce, dimred="PCA", n_dimred = 20, name="UMAP_pca20")
+set.seed(123)
+sce <- runUMAP(sce, dimred="PCA", n_dimred = 5, name="UMAP_pca5")
+set.seed(123)
+sce <- runUMAP(sce, dimred="PCA", n_dimred = 6, name="UMAP_pca6")
+set.seed(123)
+sce <- runUMAP(sce, dimred="PCA", n_dimred = 10, name="UMAP_pca10")
+
+UMAP_pca5 <- reducedDim(sce, "UMAP_pca5")
+UMAP_pca6 <- reducedDim(sce, "UMAP_pca6")
+UMAP_pca10 <- reducedDim(sce, "UMAP_pca10")
+UMAP_pca20 <- reducedDim(sce, "UMAP_pca20")
+
+lib.size <- colSums(assay(sce, "logcounts"))
+ngenes <- colSums(assay(sce, "logcounts")>0)
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = UMAP_pca5[,1],
+      UMAP2 = UMAP_pca5[,2],
+      UMAP3 = UMAP_pca6[,1],
+      UMAP4 = UMAP_pca6[,2],
+      UMAP5 = UMAP_pca10[,1],
+      UMAP6 = UMAP_pca10[,2],
+      UMAP7 = UMAP_pca20[,1],
+      UMAP8 = UMAP_pca20[,2],
+      lib.size,
+      ngenes
+      )
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top5pca_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP3, y = UMAP4, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top6pca_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP5, y = UMAP6, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top10pca_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP7, y = UMAP8, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(lib.size))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(total counts)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top5pca_by_logTotalCounts.pdf') 
+
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(ngenes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(Features Detected)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top5pca_by_logFeaturesDetected.pdf') 
+
+#runing dimentionality reduction for decontamianted counts 
+
+gene_var <- modelGeneVar(sce, assay.type="decontXlogcounts")
+gene_var
+# DataFrame with 47527 rows and 6 columns
+#                                mean       total        tech          bio
+#                           <numeric>   <numeric>   <numeric>    <numeric>
+# TSPAN6                  0.043065588  0.06092503  0.06705366  -0.00612862
+# TNMD                    0.000770317  0.00182452  0.00119939   0.00062513
+# DPM1                    0.170537353  0.25967572  0.26184999  -0.00217428
+# SCYL3                   0.077748662  0.11841583  0.12105558  -0.00263975
+# C1orf112                0.133170830  0.21345728  0.20599513   0.00746215
+# ...                             ...         ...         ...          ...
+# ENSG00000291298         9.76502e-05 0.000103255 0.000152043 -4.87873e-05
+# ENSG00000291299         2.43425e-02 0.036382942 0.037901504 -1.51856e-03
+# PRSS30P_ENSG00000291300 0.00000e+00 0.000000000 0.000000000  0.00000e+00
+# ENSG00000291301         0.00000e+00 0.000000000 0.000000000  0.00000e+00
+# EmGFP                   1.13302e-02 0.026575463 0.017641323  8.93414e-03
+#                             p.value         FDR
+#                           <numeric>   <numeric>
+# TSPAN6                  8.09321e-01 1.00000e+00
+# TNMD                    2.98807e-07 1.16785e-05
+# DPM1                    5.31694e-01 1.00000e+00
+# SCYL3                   5.82719e-01 1.00000e+00
+# C1orf112                3.64313e-01 1.00000e+00
+# ...                             ...         ...
+# ENSG00000291298         9.98942e-01 1.00000e+00
+# ENSG00000291299         6.49416e-01 1.00000e+00
+# PRSS30P_ENSG00000291300         NaN         NaN
+# ENSG00000291301                 NaN         NaN
+# EmGFP                   6.15757e-07 2.27866e-05
+
+p_gene_var <- ggplot(as.data.frame(gene_var), aes(mean, total)) +
+  geom_point() +
+  geom_line(aes(y = tech), colour = "dodgerblue", size = 1) +
+  labs(x = "Mean of log-expression", y = "Variance of log-expression")
+p_gene_var
+ggsave("gene_variance_plot_decontXlogcounts.pdf")
+
+hvgs <- getTopHVGs(gene_var, prop=0.1)
+length(hvgs)
+# [1] 1726
+
+PCA_decontXlogcounts <- scater::calculatePCA(sce, 
+                        ncomponents = 50,
+                        subset_row = hvgs,
+                        exprs_values = "decontXlogcounts"
+                       )
+
+reducedDim(sce, "PCA_decontXlogcounts") <- PCA_decontXlogcounts
+
+pdf("plotReducedDim_firt2PCAs_decontXlogcounts_by_day_H.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "day_H")
+dev.off()
+
+percent.var <- attr(reducedDim(sce, "PCA_decontXlogcounts"), "percentVar")
+pdf("variance_explaiend_PCA_decontXlogcounts.pdf")
+plot(percent.var, log = "y", xlab = "PC_decontXlogcounts", ylab = "Variance explained (%)")
+dev.off()
+
+percent.var
+#  [1] 8.0348190 3.2400572 2.4859730 1.5964780 1.1515521 0.9097774 0.7482023
+#  [8] 0.6101502 0.5370954 0.4890590 0.4390622 0.3843688 0.2874015 0.2706505
+# [15] 0.2549116 0.2381787 0.2192504 0.2087167 0.2014567 0.1952908 0.1924821
+# [22] 0.1766484 0.1715090 0.1672301 0.1601394 0.1572512 0.1565541 0.1554004
+# [29] 0.1511613 0.1509598 0.1469396 0.1462775 0.1440988 0.1421205 0.1406420
+# [36] 0.1389811 0.1380316 0.1369141 0.1351493 0.1344625 0.1342295 0.1333701
+# [43] 0.1331153 0.1317428 0.1312469 0.1305884 0.1300455 0.1297681 0.1284801
+# [50] 0.1278107
+
+chosen_elbow <- findElbowPoint(percent.var)
+chosen_elbow 
+6
+
+
+pdf("PCA_decontXlogcounts_resolving_different_days.pdf")
+ggcells(sce, aes(x = PCA_decontXlogcounts.1, y = PCA_decontXlogcounts.2, colour = day_H)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ day_H) +
+  labs(x = "PC1", y = "PC2", colour = "Day")
+dev.off()
+
+pdf("plotReducedDim_firt2PCAs_by_counts_PCA_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "sum_decontXlogcounts")
+dev.off()
+
+colData(sce)$ngens_decontXlogcounts <- colSums(assay(sce, "decontXlogcounts")>0)
+pdf("plotReducedDim_firt2PCAs_by_ngenes_PCA_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", colour_by = "ngens_decontXlogcounts")
+dev.off()
+
+pdf("plotReducedDim_firt3PCAs_comparison_by_counts_decontXlogcounts.pdf")
+plotReducedDim(sce, dimred = "PCA_decontXlogcounts", ncomponents = 3, colour_by = "sum_decontXlogcounts")
+dev.off()
+
+sce.denoised <- denoisePCA(sce, technical = gene_var, subset.row = hvgs, assay.type = "decontXlogcounts")
+ncol(reducedDim(sce.denoised, "PCA")) 
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca20", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = 20),
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca20_2", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = c(1,3:20),
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca11", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = 11,
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+
+set.seed(123)
+sce <- runUMAP(sce,
+               name = "UMAP_decontXlogcounts_pca6", 
+               dimred = "PCA_decontXlogcounts",
+               n_dimred = 6,
+               n_neighbors = 25,
+               min_dist = 0.5
+               )
+
+UMAP_pca20_2 <- reducedDim(sce, "UMAP_decontXlogcounts_pca20_2")
+UMAP_pca11 <- reducedDim(sce, "UMAP_decontXlogcounts_pca11")
+UMAP_pca6 <- reducedDim(sce, "UMAP_decontXlogcounts_pca6")
+
+
+lib.sizes_decont <- colSums(assay(sce, "decontXlogcounts"))
+ngenes_decont <- colSums(assay(sce, "decontXlogcounts")>0)
+
+df_umap <- data.frame(
+      colData(sce), 
+      UMAP1 = UMAP_pca20_2[,1],
+      UMAP2 = UMAP_pca20_2[,2],
+      UMAP3 = UMAP_pca11[,1],
+      UMAP4 = UMAP_pca11[,2],
+      UMAP5 = UMAP_pca6[,1],
+      UMAP6 = UMAP_pca6[,2],
+      lib.sizes_decont,
+      ngenes_decont
+      )
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_decontXlogcounts_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP3, y = UMAP4, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top11pca_decontXlogcounts_by_Day.pdf') 
+
+ggplot(df_umap, aes(x = UMAP5, y = UMAP6, color = factor(day_H))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "Day") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_legend(override.aes = list(size = 5))) + 
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top6pca_decontXlogcounts_by_Day.pdf') 
+
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, color = log(ngenes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(features detected)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_decontXlogcounts_by_logFeaturesDetected.pdf') 
+
+ggplot(df_umap, aes(x = UMAP3, y = UMAP4, color = log(lib.sizes))) +
+        geom_point(size = 0.4) +
+        labs(x = "Dim 1", y = "Dim 2", color = "log(total counts)") + 
+        theme_minimal() +
+        theme(legend.position = "right") +  
+        guides(colour = guide_colorbar(barwidth = 1, barheight = 10)) +
+        coord_fixed(ratio = 1)
+ggsave('UMAP_top20pca_decontXlogcounts_by_logTotalCounts.pdf') 
+
+
+#save data sce with both PCA and UMAP for logcoutns and decontXlogcounts
+saveRDS(sce, "/mnt/hanna/axonoutgrowth/human2/DimRed/sce_DimRed_after_decontX.rds")
